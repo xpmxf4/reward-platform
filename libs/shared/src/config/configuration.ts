@@ -1,4 +1,5 @@
-export default () => ({
+// libs/shared/src/config/configuration.ts
+export const configuration = () => ({
   port: parseInt(process.env.PORT, 10) || 3000,
   auth: {
     jwtSecret: process.env.JWT_SECRET || 'your-secret-key',

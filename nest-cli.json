@@ -1,14 +1,14 @@
 {
   "$schema": "https://json.schemastore.org/nest-cli",
   "collection": "@nestjs/schematics",
-  "sourceRoot": "apps/reward-platform/src",
+  "sourceRoot": "apps/auth-service/src",
   "compilerOptions": {
     "deleteOutDir": true,
     "webpack": true,
-    "tsConfigPath": "apps/reward-platform/tsconfig.app.json"
+    "tsConfigPath": "apps/auth-service/tsconfig.app.json"
   },
   "monorepo": true,
-  "root": "apps/reward-platform",
+  "root": "apps/auth-service",
   "projects": {
     "auth-service": {
       "type": "application",
@@ -26,33 +26,6 @@
       "sourceRoot": "libs/common/src",
       "compilerOptions": {
         "tsConfigPath": "libs/common/tsconfig.lib.json"
-      }
-    },
-    "event-service": {
-      "type": "application",
-      "root": "apps/event-service",
-      "entryFile": "main",
-      "sourceRoot": "apps/event-service/src",
-      "compilerOptions": {
-        "tsConfigPath": "apps/event-service/tsconfig.app.json"
-      }
-    },
-    "gateway": {
-      "type": "application",
-      "root": "apps/gateway",
-      "entryFile": "main",
-      "sourceRoot": "apps/gateway/src",
-      "compilerOptions": {
-        "tsConfigPath": "apps/gateway/tsconfig.app.json"
-      }
-    },
-    "reward-platform": {
-      "type": "application",
-      "root": "apps/reward-platform",
-      "entryFile": "main",
-      "sourceRoot": "apps/reward-platform/src",
-      "compilerOptions": {
-        "tsConfigPath": "apps/reward-platform/tsconfig.app.json"
       }
     },
     "shared": {
