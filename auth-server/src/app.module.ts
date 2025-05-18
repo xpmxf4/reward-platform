@@ -3,12 +3,12 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import {ConfigModule, ConfigService} from "@nestjs/config";
 import {MongooseModule} from "@nestjs/mongoose";
-import { UsersModule } from './users.module';
-import { UsersService } from './users.service';
-import { UsersController } from './users.controller';
-import { AuthModule } from './auth.module';
-import { AuthService } from './auth.service';
-import { AuthController } from './auth.controller';
+import { UsersModule } from './users/users.module';
+import { UsersService } from './users/service/users.service';
+import { UsersController } from './users/controller/users.controller';
+import { AuthModule } from './auth/auth.module';
+import { AuthService } from './auth/service/auth.service';
+import { AuthController } from './auth/controller/auth.controller';
 
 @Module({
   imports: [
