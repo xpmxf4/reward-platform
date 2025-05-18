@@ -35,6 +35,8 @@ UserSchema.pre<UserDocument>('save', async function (next) {
 });
 
 // 비밀번호 일치 여부 확인을 위한 인스턴스 메서드
-UserSchema.methods.comparePassword = async function (candidatePassword: string): Promise<boolean> {
+UserSchema.methods.comparePassword = async function (
+  candidatePassword: string,
+): Promise<boolean> {
   return bcrypt.compare(candidatePassword, this.password);
 };
