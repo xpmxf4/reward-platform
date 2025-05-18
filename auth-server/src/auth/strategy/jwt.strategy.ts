@@ -1,55 +1,60 @@
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { ExtractJwt, Strategy, StrategyOptions } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../../users/service/users.service';
 import { UserDocument } from '../../users/schemas/user.schema';
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
-import { PassportStrategy } from '@nestjs/passport';
-import { Strategy, ExtractJwt } from 'passport-jwt';
 
 export interface JwtPayload {
   username: string;
-  sub: string; // userId를 여기에 담음
+  sub: string; // userId
   roles: string[];
-  iat?: number; // Issued at (자동 생성됨)
-  exp?: number; // Expiration time (자동 생성됨)
+  iat?: number;
+  exp?: number;
 }
 
 @Injectable()
-export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') { // 'jwt'는 기본 전략 이름
-  private readonly logger = new Logger(JwtStrategy.name);
+export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
+  private readonly logger: Logger;
 
   constructor(
     private readonly configService: ConfigService,
-    private readonly usersService: UsersService, // 사용자 DB 조회 위해 주입
+    private readonly usersService: UsersService,
   ) {
-    const jwtSecret = configService.get<string>('JWT_SECRET');
-    if (!jwtSecret) {
-      throw new Error('JWT_SECRET is not defined in environment variables');
+    const secret = configService.get<string>('JWT_SECRET');
+    if (!secret) {
+      console.error('FATAL ERROR: JWT_SECRET is not defined...');
+      throw new Error('FATAL ERROR: JWT_SECRET is not defined...');
     }
 
-    super({
+    // 옵션 객체를 명시적으로 생성
+    const strategyOptions: StrategyOptions = { // passport-jwt에서 가져온 StrategyOptions 사용
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: jwtSecret
-    });
-    this.logger.log(`JWT_SECRET used in JwtStrategy: ${configService.get<string>('JWT_SECRET') ? 'Loaded' : 'NOT LOADED'}`);
+      secretOrKey: secret,
+      passReqToCallback: false, // 명시적으로 false 설정
+    };
+
+    super(strategyOptions); // 타입이 일치하는지 확인
+
+    this.logger = new Logger(JwtStrategy.name);
+    this.logger.log('JwtStrategy initialized.');
   }
 
   async validate(payload: JwtPayload): Promise<Omit<UserDocument, 'password'> & { userId: string }> {
+    // ... validate 로직 ...
     this.logger.debug(`Validating JWT payload: ${JSON.stringify(payload)}`);
-
     const user = await this.usersService.findOneById(payload.sub);
     if (!user || !user.isActive) {
-      this.logger.warn(`JWT validation failed: User not found or inactive for userId ${payload.sub}`);
+      this.logger.warn(`JWT validation failed for userId ${payload.sub}`);
       throw new UnauthorizedException('유효하지 않은 토큰이거나 사용자가 비활성 상태입니다.');
     }
-
     const { password, ...result } = user.toObject();
-
     return {
-      ...result, // DB에서 가져온 사용자 정보 (비밀번호 제외)
-      userId: payload.sub, // JWT 페이로드의 userId (확인차)
-      username: payload.username, // JWT 페이로드의 username
-      roles: payload.roles, // JWT 페이로드의 roles
+      ...result,
+      userId: payload.sub,
+      username: payload.username,
+      roles: payload.roles,
     };
   }
 }
