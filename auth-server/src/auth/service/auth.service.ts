@@ -1,41 +1,62 @@
-import { ConflictException, Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { User, UserDocument } from '../../users/schemas/user.schema';
-import { Model } from 'mongoose';
+import { Injectable, ConflictException, InternalServerErrorException, Logger } from '@nestjs/common';
+import { UsersService } from '../../users/service/users.service';
 import { CreateUserDto } from '../../users/dto/create-user.dto';
+import { UserDocument } from '../../users/schemas/user.schema';
+import { JwtService } from '@nestjs/jwt';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
-    // User.name은 스키마 클래스의 이름 문자열을 참조합니다.
-    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
   ) {}
 
-  async create(createUserDto: CreateUserDto): Promise<UserDocument> {
-    const { username, password, roles } = createUserDto;
+  async register(createUserDto: CreateUserDto): Promise<Omit<UserDocument, 'password'>> {
+    try {
+      const user = await this.usersService.create(createUserDto);
+      const result = user.toObject();
+      delete result.password;
+      return result as Omit<UserDocument, 'password'>;
+    } catch (error) {
+      if (error instanceof ConflictException) {
+        throw new ConflictException(error.message); // UsersService에서 오는 메시지 사용
+      }
+      this.logger.error(`Registration error: ${error.message}`, error.stack);
+      throw new InternalServerErrorException('사용자 등록 중 오류가 발생했습니다.');
+    }
+  }
 
-    const existingUser = await this.userModel.findOne({ username }).exec();
-    if (existingUser) {
-      throw new ConflictException(
-        `사용자명 '${username}'은 이미 사용중입니다.`,
-      );
+  async validateUser(username: string, pass: string): Promise<Omit<UserDocument, 'password'> | null> {
+    const user = await this.usersService.findOneByUsername(username);
+    if (user && (await user.comparePassword(pass))) {
+      const result = user.toObject();
+      delete result.password;
+      return result as Omit<UserDocument, 'password'>;
+    }
+    return null;
+  }
+
+  async login(userFromRequest: Pick<UserDocument, 'username' | '_id' | 'roles'>): Promise<{ accessToken: string }> {
+    const payload = {
+      username: userFromRequest.username,
+      sub: (userFromRequest._id as any).toHexString(),
+      roles: userFromRequest.roles
+    };
+
+    if (!payload.sub) {
+      this.logger.error('User ID (sub) is missing in payload for JWT generation', userFromRequest);
+      throw new InternalServerErrorException('로그인 처리 중 오류가 발생했습니다.');
     }
 
-    // roles가 제공되지 않으면 기본값 'USER'로 설정 (스키마 기본값도 있지만, 명시적으로도 가능)
-    const userToCreate = new this.userModel({
-      username,
-      password, // 해싱은 스키마의 pre-save hook에서 처리
-      roles: roles && roles.length > 0 ? roles : ['USER'],
-    });
-    return userToCreate.save();
-  }
-
-  async findOneByUsername(username: string): Promise<UserDocument | null> {
-    return this.userModel.findOne({ username }).exec();
-  }
-
-  async findOneById(userId: string): Promise<UserDocument | null> {
-    // Mongoose는 ID로 검색 시 자동으로 ObjectId로 변환 시도
-    return this.userModel.findById(userId).exec();
+    try {
+      return {
+        accessToken: this.jwtService.sign(payload),
+      };
+    } catch (error) {
+      this.logger.error(`JWT sign error: ${error.message}`, error.stack);
+      throw new InternalServerErrorException('로그인 토큰 생성 중 오류가 발생했습니다.');
+    }
   }
 }
