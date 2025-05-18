@@ -1,10 +1,11 @@
-import { All, Controller, Req, Res, Logger, HttpStatus } from '@nestjs/common';
+import { All, Controller, Req, Res, Logger, HttpStatus, UseGuards, Get, Post } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { firstValueFrom, throwError } from 'rxjs';
 import { catchError, map } from 'rxjs/operators';
 import { AxiosError, AxiosResponse } from 'axios';
+import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
 
 @Controller('/api/auth')
 export class AuthProxyController {
@@ -25,12 +26,30 @@ export class AuthProxyController {
     this.logger.log(`Auth Service URL initialized to: ${this.authServiceUrl}`);
   }
 
+  @Get('profile')
+  @UseGuards(JwtAuthGuard)
+  async proxyProfile(@Req() req: Request, @Res() res: Response) {
+    this.logger.log(`Gateway: Authenticated user for profile: ${JSON.stringify(req.user)}`);
+    await this.proxyToAuthService(req, res); // 기존 프록시 로직 호출
+  }
+
+  @Post('login')
+  async proxyLogin(@Req() req: Request, @Res() res: Response) {
+    await this.proxyToAuthService(req, res);
+  }
+
+  @Post('register')
+  async proxyRegister(@Req() req: Request, @Res() res: Response) {
+    await this.proxyToAuthService(req, res);
+  }
+
+
   @All('*')
   async proxyToAuthService(@Req() req: Request, @Res() res: Response) {
     const { method, originalUrl, body, headers: clientHeaders } = req;
 
     const targetPath = originalUrl.replace('/api/auth', '');
-    const targetUrl = `${this.authServiceUrl}${targetPath}`;
+    const targetUrl = `<span class="math-inline">\{this\.authServiceUrl\}</span>{targetPath}`;
 
     this.logger.log(`Proxying request: ${method} ${targetUrl}`);
     if (Object.keys(body).length > 0) { // 본문이 있을 경우에만 로그 기록 (GET 요청 등은 본문 없음)
