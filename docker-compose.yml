@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  gateway-server:
+    build:
+      context: ./gateway-server
+      dockerfile: Dockerfile
+    container_name: gateway_server
+    ports:
+      - "3000:3000" 
+    environment:
+      NODE_ENV: development
+      PORT: 3000 
+      AUTH_SERVICE_URL: http://auth-server:3001 
+      EVENT_SERVICE_URL: http://event-server:3002
+    volumes:
+      - ./gateway-server:/usr/src/app
+      - /usr/src/app/node_modules
+    command: npm run start:dev
+    depends_on:
+      - auth-server
+      - event-server
+    networks:
+      - maple_event_network
+
+  auth-server:
+    build:
+      context: ./auth-server
+      dockerfile: Dockerfile
+    container_name: auth_server
+    environment:
+      NODE_ENV: development
+      PORT: 3001 
+      MONGODB_URI: mongodb://mongo_db:27017/auth_db
+    volumes:
+      - ./auth-server:/usr/src/app
+      - /usr/src/app/node_modules
+    command: npm run start:dev
+    depends_on:
+      - mongo_db
+    networks:
+      - maple_event_network
+
+  event-server:
+    build:
+      context: ./event-server
+      dockerfile: Dockerfile
+    container_name: event_server
+    environment:
+      NODE_ENV: development
+      PORT: 3002 
+      MONGODB_URI: mongodb://mongo_db:27017/event_db
+      AUTH_SERVICE_INTERNAL_URL: http://auth-server:3001
+    volumes:
+      - ./event-server:/usr/src/app
+      - /usr/src/app/node_modules
+    command: npm run start:dev
+    depends_on:
+      - mongo_db
+      - auth-server 
+    networks:
+      - maple_event_network
+
+  mongo_db:
+    image: mongo:latest
+    container_name: mongo_db_container
+    ports:
+      - "27017:27017" 
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - maple_event_network
+
+volumes:
+  mongo_data:
+
+networks:
+  maple_event_network:
+    driver: bridge
