@@ -4,9 +4,9 @@ import * as bcrypt from 'bcrypt';
 
 export type UserDocument = User & Document;
 
-@Schema({ timestamps: true }) // createdAt, updatedAt 자동 생성
+@Schema({ timestamps: true })
 export class User {
-  @Prop({ required: true, unique: true, trim: true, index: true }) // username은 검색에 자주 사용되므로 index 추가
+  @Prop({ required: true, unique: true, trim: true, index: true })
   username: string;
 
   @Prop({ required: true })
@@ -26,7 +26,7 @@ UserSchema.pre<UserDocument>('save', async function (next) {
     return next();
   }
   try {
-    const saltRounds = 10; // bcrypt salt rounds
+    const saltRounds = 10;
     this.password = await bcrypt.hash(this.password, saltRounds);
     return next();
   } catch (err) {
@@ -34,9 +34,6 @@ UserSchema.pre<UserDocument>('save', async function (next) {
   }
 });
 
-// 비밀번호 일치 여부 확인을 위한 인스턴스 메서드
-UserSchema.methods.comparePassword = async function (
-  candidatePassword: string,
-): Promise<boolean> {
+UserSchema.methods.comparePassword = async function (candidatePassword: string): Promise<boolean> {
   return bcrypt.compare(candidatePassword, this.password);
 };
