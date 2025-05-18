@@ -1,0 +1,43 @@
+# IDE & Editor specific
+.idea/
+.vscode/
+*.suo
+*.user
+*.sln
+*.sandcastle
+
+# Dependency directories
+node_modules/
+**/node_modules/ # 각 서비스 폴더 내 node_modules도 무시
+
+# Build output
+dist/
+**/dist/ # 각 서비스 폴더 내 dist도 무시
+build/
+coverage/
+
+# Log files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment variables
+.env
+.env.*
+**/src/.env # 각 서비스 src 폴더 내 .env 파일도 무시
+**/.env # 각 서비스 폴더 루트의 .env 파일도 무시 (일관성을 위해 src/.env 권장)
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker
+docker-compose.override.yml # 개인 오버라이드 파일
