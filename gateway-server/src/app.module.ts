@@ -12,7 +12,6 @@ import { JwtStrategy } from '../auth/strategy/jwt.strategy';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: '.env',
     }),
     HttpModule.register({
       timeout: 5000,
