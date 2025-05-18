@@ -3,6 +3,12 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import {ConfigModule, ConfigService} from "@nestjs/config";
 import {MongooseModule} from "@nestjs/mongoose";
+import { UsersModule } from './users.module';
+import { UsersService } from './users.service';
+import { UsersController } from './users.controller';
+import { AuthModule } from './auth.module';
+import { AuthService } from './auth.service';
+import { AuthController } from './auth.controller';
 
 @Module({
   imports: [
@@ -16,9 +22,11 @@ import {MongooseModule} from "@nestjs/mongoose";
           uri: configService.get<string>('MONGODB_URI'),
         }),
         inject: [ConfigService],
-      })
+      }),
+      UsersModule,
+      AuthModule
   ],
-  controllers: [AppController],
-  providers: [AppService],
+  controllers: [AppController, UsersController, AuthController],
+  providers: [AppService, UsersService, AuthService],
 })
 export class AppModule {}
