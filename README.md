@@ -13,6 +13,25 @@
 
 ## 실행 방법
 
+1. 프로젝트 루트 디렉토리에서 아래 명령어를 실행하여 모든 서비스를 빌드하고 실행합니다. (최초 실행 시 또는 변경사항 있을 시 `--build` 옵션 포함)
+   ```bash
+   docker-compose up --build -d
+   ```
+2. 서비스 중지 및 컨테이너/네트워크 삭제는 아래 명령어를 사용합니다.
+   ```bash
+   docker-compose down
+   ```
+3. (선택) 데이터 볼륨까지 완전히 삭제하려면 아래 명령어를 사용합니다. (주의: MongoDB 데이터가 삭제됩니다.)
+   ```bash
+   docker-compose down -v
+   ```
+
+### 서비스 포트 정보
+- Gateway Server: `http://localhost:3000`
+- Auth Server: (내부 통신용, 기본 포트 3001 가정)
+- Event Server: (내부 통신용, 기본 포트 3002 가정)
+- MongoDB: `mongodb://localhost:27017` (로컬에서 직접 접근 시, DB 이름은 `auth_db`, `event_db`)
+
 ## 설계 문서
 - [과제 분석](./docs/00_Assignment_Analysis.md)
 - [시스템 아키텍처 (현재 및 향후 확장)](./docs/01_System_Architecture.md)
