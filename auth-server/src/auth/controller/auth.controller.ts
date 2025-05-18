@@ -1,7 +1,7 @@
 import { Controller } from '@nestjs/common';
-import { UsersService } from '../../users/service/users.service';
+import { AuthService } from '../service/auth.service';
 
-@Controller('users') // 기본 경로 '/users'
-export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+@Controller('auth') // 기본 경로 '/users'
+export class AuthController {
+  constructor(private readonly authService: AuthService) {}
 }
