@@ -7,6 +7,7 @@ import { AuthProxyModule } from './proxies/auth-proxy.module';
 import { PassportModule } from '@nestjs/passport';
 import { JwtModule } from '@nestjs/jwt';
 import { JwtStrategy } from '../auth/strategy/jwt.strategy';
+import { EventProxyModule } from './proxies/event-proxy.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { JwtStrategy } from '../auth/strategy/jwt.strategy';
       inject: [ConfigService],
     }),
     AuthProxyModule,
+    EventProxyModule
   ],
   controllers: [AppController],
   providers: [
