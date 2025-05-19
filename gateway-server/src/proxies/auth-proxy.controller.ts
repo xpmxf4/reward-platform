@@ -50,15 +50,9 @@ export class AuthProxyController {
     let targetPath = originalUrl.replace('/api/auth', '');
     const targetUrl = `${this.authServiceUrl}/auth${targetPath}`; // ★★★ 변수 제대로 사용 ★★★
 
-    this.logger.log(`Original URL: ${originalUrl}`);
-    this.logger.log(`Target Path: ${targetPath}`);
-    this.logger.log(`Calculated Target URL for Axios: ${targetUrl}`); // ★★★ 올바른 로깅 ★★★
-    this.logger.log(`Proxying request: ${method} ${targetUrl}`); // ★★★ 올바른 로깅 ★★★
-    this.logger.log(`Proxying request: ${method} ${targetUrl}`);
     if (Object.keys(body).length > 0) { // 본문이 있을 경우에만 로그 기록 (GET 요청 등은 본문 없음)
       this.logger.debug(`Request body: ${JSON.stringify(body)}`);
     }
-
 
     const headersToForward: Record<string, string> = {};
     if (clientHeaders['content-type']) {
