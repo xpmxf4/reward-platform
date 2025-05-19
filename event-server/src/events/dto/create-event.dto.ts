@@ -1,38 +1,32 @@
-import {IsEnum, IsMongoId, IsNotEmpty, IsNumber, IsObject, IsOptional, IsString, Min,} from 'class-validator';
+import { IsString, IsNotEmpty, IsDateString, IsObject, ValidateNested, IsArray, ArrayMinSize, IsOptional } from 'class-validator';
+import { Type } from 'class-transformer';
+import { CreateRewardDto } from './reward.dto'; // Reward DTO 임포트
 
-// 보상 타입 Enum (스키마와 일치)
-export enum RewardTypeEnum {
-  POINT = 'POINT',
-  ITEM = 'ITEM',
-  COUPON = 'COUPON',
-  VIRTUAL_CURRENCY = 'VIRTUAL_CURRENCY',
-}
-
-export class CreateRewardDto {
-  @IsOptional() 
-  @IsMongoId({message: '유효한 보상 ID가 아닙니다.'})
-  _id?: string; 
-
-  @IsEnum(RewardTypeEnum, { message: '유효한 보상 타입이 아닙니다.' })
-  @IsNotEmpty({ message: '보상 타입은 필수입니다.' })
-  rewardType: RewardTypeEnum;
-
+export class CreateEventDto {
   @IsString()
-  @IsNotEmpty({ message: '보상 이름은 필수입니다.' })
-  rewardName: string;
-
-  @IsObject({ message: '보상 세부 정보는 객체여야 합니다.' })
-  @IsNotEmpty({ message: '보상 세부 정보는 필수입니다.' })
-  details: Record<string, any>;
-
-  @IsNumber({}, {message: "사용자당 지급 수량은 숫자여야 합니다."})
-  @Min(1, {message: "사용자당 지급 수량은 최소 1 이상이어야 합니다."})
-  @IsNotEmpty({ message: '사용자당 지급 수량은 필수입니다.' })
-  quantityPerUser: number;
+  @IsNotEmpty({ message: '이벤트 이름은 필수입니다.' })
+  eventName: string;
 
   @IsOptional()
-  @IsNumber({}, {message: "총 재고는 숫자여야 합니다."})
-  @Min(-1, {message: "총 재고는 -1(무제한) 또는 0 이상이어야 합니다."}) // -1은 무제한
-  totalStock?: number;
+  @IsString()
+  description?: string;
 
+  @IsDateString({}, { message: '유효한 날짜 형식이 아닙니다 (ISO8601).' })
+  @IsNotEmpty({ message: '이벤트 시작일은 필수입니다.' })
+  startDate: string; // ISO8601 형식의 날짜 문자열 (예: "2025-06-01T00:00:00Z")
+
+  @IsDateString({}, { message: '유효한 날짜 형식이 아닙니다 (ISO8601).' })
+  @IsNotEmpty({ message: '이벤트 종료일은 필수입니다.' })
+  endDate: string;
+
+  @IsObject({ message: '이벤트 조건은 객체여야 합니다.' })
+  @IsNotEmpty({ message: '이벤트 조건은 필수입니다.' })
+  conditions: Record<string, any>;
+
+  @IsArray()
+  @ValidateNested({ each: true }) // 배열의 각 요소에 대해 유효성 검사
+  @Type(() => CreateRewardDto) // 배열 요소의 타입을 명시
+  @IsOptional() // 보상은 없을 수도 있음
+      // @ArrayMinSize(1, { message: '최소 하나 이상의 보상이 필요합니다.' }) // 필요하다면 이 옵션 사용
+  rewards?: CreateRewardDto[];
 }
