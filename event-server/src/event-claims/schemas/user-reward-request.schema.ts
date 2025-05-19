@@ -76,7 +76,7 @@ export class UserRewardRequest {
   currentSagaStep?: string;
 
   @Prop({ type: [ProcessedRewardInfoSchema], default: [] })
-  processedRewards: Types.DocumentArray<ProcessedRewardInfo>;
+  rewardsToProcess: Types.DocumentArray<ProcessedRewardInfo>;
 
   @Prop({ type: String })
   failureReason?: string;

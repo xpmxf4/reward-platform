@@ -5,6 +5,8 @@ export type RewardDocument = Reward & Document;
 
 @Schema({ _id: true, timestamps: false, versionKey: false }) // 임베디드될 때 자체 _id를 가지도록, 타임스탬프는 불필요
 export class Reward {
+  @Prop({type: Types.ObjectId, auto: true})
+  _id: Types.ObjectId; // Mongoose가 자동으로 생성하는 ObjectId
 
   @Prop({
     type: String,
