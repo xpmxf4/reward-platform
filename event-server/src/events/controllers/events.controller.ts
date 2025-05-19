@@ -3,7 +3,7 @@ import { EventsService } from '../services/event.service';
 import { CreateEventDto } from '../dto/create-event.dto';
 import { UpdateEventDto, EventStatusEnum } from '../dto/update-event.dto';
 import { EventDocument } from '../schemas/event.schema';
-import { Request as ExpressRequest } from 'express'; // ★★★ Express의 Request 타입을 직접 import ★★★
+import { Request as ExpressRequest } from 'express';
 
 interface AuthenticatedUser {
   userId: string;
