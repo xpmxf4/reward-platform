@@ -19,8 +19,23 @@ interface RequestWithUser extends ExpressRequest {
 export class EventsController {
   constructor(private readonly eventsService: EventsService) {}
 
-  // @UseGuards(JwtAuthGuard) // 실제로는 Gateway에서 인증 처리 후 사용자 정보 전달받음
+  // @UseGuards( 어떤 Guard를 쓸지는 Event Server 자체 정책 )
+  @Get('test-auth') // Gateway에서 /api/events/test-auth 로 호출
+  async testAuth(@NestRequestDecorator() req: RequestWithUser): Promise<any> {
+    const userIdFromHeader = req.headers['x-user-id'] as string;
+    const userRolesFromHeader = req.headers['x-user-roles'] as string;
+    const userNameFromHeader = req.headers['x-user-name'] as string;
+
+    return {
+      message: 'Event Server: test-auth endpoint reached!',
+      gatewayPassedUserId: userIdFromHeader,
+      gatewayPassedUserRoles: userRolesFromHeader?.split(','),
+      gatewayPassedUserName: userNameFromHeader,
+    };
+  }
+
   // @Roles('OPERATOR', 'ADMIN')
+  // @UseGuards(JwtAuthGuard) // 실제로는 Gateway에서 인증 처리 후 사용자 정보 전달받음
   @Post()
   async create(@Body() createEventDto: CreateEventDto, @NestRequestDecorator() req: RequestWithUser): Promise<EventDocument> {
     const createdByUserId = req.user?.userId || 'temp-operator-id'; // 임시 ID 또는 req.headers['x-user-id']
