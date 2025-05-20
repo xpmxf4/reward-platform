@@ -4,6 +4,7 @@ import { AppService } from './app.service';
 import {ConfigModule, ConfigService} from "@nestjs/config";
 import {MongooseModule} from "@nestjs/mongoose";
 import { EventsModule } from './events/events.module';
+import { EventClaimsModule } from './event-claims/event-claims.module';
 
 @Module({
   imports: [
@@ -11,7 +12,7 @@ import { EventsModule } from './events/events.module';
       isGlobal: true
     }),
     MongooseModule.forRootAsync({
-      imports: [ConfigModule, EventsModule],
+      imports: [ConfigModule, EventsModule, EventClaimsModule],
       useFactory: async (configService: ConfigService) => ({
         uri: configService.get<string>('MONGODB_URI'),
       }),
