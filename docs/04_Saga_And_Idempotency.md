@@ -1,8 +1,12 @@
-# Saga 패턴 및 멱등성 설계
+# Saga 패턴 및 멱등성(Idempotency) 설계
 
 ## 1. 서론
 
-본 문서는 "이벤트 / 보상 관리 플랫폼"의 핵심 트랜잭션인 **사용자 보상 요청 처리** 과정의 안정성 및 데이터 일관성 확보 목적의 Saga 패턴 적용 전략과 API 요청의 멱등성(Idempotency) 확보 방안 기술. 마이크로서비스 아키텍처(MSA) 환경의 부분적 실패(Partial Failures)에 대한 효과적 대응 및 모든 사용자에 대한 일관된 서비스 경험 제공을 최우선 목표로 설정. 본 설계는 현재의 동기식 API 통신 기반 시스템을 기준으로 하되, 향후 비동기 메시지 큐(예: Apache Kafka) 도입을 통한 확장 가능성 염두.
+본 문서는 "이벤트 / 보상 관리 플랫폼"의 핵심 트랜잭션인 **사용자 보상 요청 처리** 과정의 안정성 및 데이터 일관성 확보를 위한 Saga 패턴 적용 전략과 API 요청의 멱등성 확보 방안을 상세히 기술한다.
+
+마이크로서비스 아키텍처(MSA) 환경에서 발생 가능한 부분적 실패(Partial Failures)에 효과적으로 대응하고, 모든 사용자에게 일관된 서비스 경험을 제공하는 것을 목표.
+
+본 설계는 현재 `EventClaimsService`에 구현된 동기식 Orchestration Saga와 `EventsService`의 재고 관리 로직을 기준으로 하며, 향후 비동기 메시지 큐(예: Apache Kafka) 도입을 통한 확장 가능성 논의
 
 ## 2. 사용자 보상 요청 처리 Saga (User Reward Claim Saga)
 
@@ -10,280 +14,430 @@
 
 - **Saga 명칭:** 사용자 보상 요청 처리 (User Reward Claim Saga)
 - **핵심 목표:**
-    - 사용자 특정 이벤트 보상 요청 접수 및 유효성 검증 (사용자 상태, 이벤트 상태, 기수령 여부).
-    - 이벤트 조건 충족 여부의 정확한 판정.
-    - 한정 수량 보상의 경우, 재고의 일관성 있는 확인 및 차감 (현재 설계: 단순화된 DB 업데이트 방식 채택).
-    - 검증된 조건 및 재고 상태 기반의 보상 지급 실행 (외부 시스템 연동: Mock 인터페이스 가정).
-    - Saga 전 과정의 상태 변화 추적 가능 형태 기록 (`UserRewardRequest` 문서).
-    - Saga 진행 중 예외 발생 시, 기완료 선행 단계 작업의 안전한 **롤백(보상 트랜잭션 실행)**을 통한 데이터의 최종적 일관성(Eventual Consistency) 보장.
+    - 사용자의 특정 이벤트에 대한 보상 요청 접수 및 유효성 검증 (사용자 상태, 이벤트 상태, 기수령 여부).
+    - 이벤트 조건 충족 여부의 정확한 판정 (현재는 `EventClaimsService` 내 Mock 로직 사용).
+    - 한정 수량 보상의 경우, 재고의 일관성 있는 확인 및 차감 (`EventsService`의 DB 조건부 업데이트 활용, `EventClaimsService`에서 호출).
+    - 검증된 조건 및 재고 상태 기반의 보상 지급 실행 (외부 시스템 연동은 `EventClaimsService` 내 Mock 인터페이스로 가정).
+    - Saga 전 과정의 상태 변화를 `UserRewardRequest` 문서에 상세히 기록 및 추적.
+    - Saga 진행 중 예외 발생 시, 기완료된 선행 단계 작업의 안전한 **롤백(보상 트랜잭션 실행)**을 통한 데이터의 최종적 일관성(Eventual Consistency) 보장.
 - **주요 참여 액터 및 역할:**
-    - **Client (사용자 인터페이스):** 보상 요청 API 호출 (`X-Idempotency-Key` 헤더 포함).
-    - **Gateway Server:** API 요청 수신, 1차 인증(JWT 유효성 검증), Event Server로의 프록시. `X-User-ID`, `X-User-Roles`, `X-User-Name` 등 신뢰 사용자 식별 정보의 HTTP 헤더 추가 후 백엔드 서비스 전달.
-    - **Event Server (주 담당: `EventClaimsService`):**
-        - 본 Saga의 <strong>Orchestrator</strong> 역할 수행 (현재 동기 API 호출 기반).
+    - **Client (사용자 인터페이스):** 보상 요청 API (`POST /api/event-claims/{eventId}/claim`) 호출 (`X-Idempotency-Key` 헤더 포함).
+    - **Gateway Server (`EventClaimProxyController` 등):** API 요청 수신, 1차 인증(JWT 유효성 검증), `event-server`로 프록시. `X-User-ID`, `X-User-Roles`, `X-User-Name` 헤더를 통해 인증된 사용자 식별 정보 전달.
+    - **Event Server (주 담당: `event-claims.service.ts`의 `EventClaimsService`):**
+        - 본 Saga의 <strong>Orchestrator</strong> 역할 수행.
         - `UserRewardRequest` 상태 객체를 통한 Saga 인스턴스 상태 관리 및 영속화.
-        - 각 Saga 단계별 비즈니스 로직 실행 및 결과 기록.
-        - 필요시 타 서비스(Auth Server, (가상) Game Data Service, (가상) Reward Fulfillment Service) API 호출을 통한 정보 조회 및 기능 실행 요청.
+        - 각 Saga 단계별 비즈니스 로직 실행 (`processRewardClaimSaga` 메서드) 및 결과 기록.
+        - 필요시 타 서비스(Auth Server Mock, Game Data Service Mock, Reward Fulfillment Service Mock) 호출.
+        - `events.service.ts`의 `eventModel`을 사용하여 이벤트 정보 조회 및 재고 업데이트/롤백 (`compensateInventory` 메서드 내에서).
         - 단계별 실패 감지 및 정의된 보상 트랜잭션 실행 지시.
-    - **Auth Server (API 제공자):** Event Server로부터 특정 `userId` 유효성(계정 활성 상태 등) 확인 요청 처리.
-    - **(가상) Game Data Service (API 제공자 - Mock Interface):** Event Server로부터 특정 이벤트 조건(예: 퀘스트 완료, 활동 횟수) 사용자 데이터 조회 요청 처리. (현재 과제: Event Server 내 Mock 로직 또는 단순 DB 조회로 대체 가능).
-    - **(가상) Reward Fulfillment Service (API 제공자 - Mock Interface):** Event Server로부터 실제 보상(아이템, 포인트 등) 지급 실행 요청 처리. (현재 과제: Event Server 내 Mock 로직으로 대체 가능).
+    - **(Mock) Auth Service (`EventClaimsService` 내 `mockAuthService`):** `isUserActive`를 통해 사용자 활성 상태 확인.
+    - **(Mock) Game Data Service (`EventClaimsService` 내 `mockGameDataService`):** `checkConditions`를 통해 이벤트 조건 달성 여부 확인.
+    - **(Mock) Reward Fulfillment Service (`EventClaimsService` 내 `mockRewardFulfillmentService`):** `grantReward`를 통해 실제 보상 지급 시뮬레이션.
 
 ### 2.2. Saga 전체 흐름도 (High-Level Flowchart)
 
-사용자 보상 요청 처리 Saga의 전체적 진행 흐름. 각 단계는 `UserRewardRequest` 상태 변화와 밀접한 연관.
-
-```mermaid
-graph LR
-    S0[S0: 요청 접수 및 초기화<br>Idempotency Key 검증,<br>UserRewardRequest 생성:<br>PENDING_VALIDATION] --> S1{S1: 사용자/이벤트 유효성 검증<br>Auth API, Event DB 조회}
-    S1 -- 유효성 통과 --> S2{S2: 이벤트 조건 달성 검증<br>Mock Game Data API 조회}
-    S1 -- 사용자 비활성 --> FAIL_USER_INACTIVE[실패: 사용자 비활성<br>Status: VALIDATION_FAILED_USER_INACTIVE]
-    S1 -- 이벤트 비활성/종료 --> FAIL_EVENT_STATE[실패: 이벤트 상태 오류<br>Status: VALIDATION_FAILED_EVENT_NOT_ACTIVE]
-    S1 -- 이미 수령 --> FAIL_ALREADY_CLAIMED[실패: 기수령<br>Status: VALIDATION_FAILED_ALREADY_CLAIMED]
-
-    S2 -- 조건 충족 --> S3{S3: 재고 반영 단순화<br>Event DB 업데이트}
-    S2 -- 조건 미충족 --> FAIL_CONDITION_NOT_MET[실패: 조건 미충족<br>Status: CONDITION_NOT_MET]
-    S2 -- 외부 시스템 오류 --> FAIL_CONDITION_EXTERNAL[실패: 조건 검증 외부 오류<br>Status: CONDITION_CHECK_FAILED_EXTERNAL]
-
-    S3 -- 재고 확보 성공 --> S4{S4: 보상 지급 실행<br>Mock Reward Fulfillment API 호출}
-    S3 -- 재고 부족 --> FAIL_INVENTORY_STOCK[실패: 재고 부족<br>Status: INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK]
-    S3 -- 재고 할당 오류 --> FAIL_INVENTORY_ERROR[실패: 재고 할당 오류<br>Status: INVENTORY_ALLOCATION_ERROR]
-
-    S4 -- 모든 보상 지급 성공 --> S5[S5: 최종 성공 기록<br>Status: SUCCESS_ALL_GRANTED]
-    S4 -- 일부 보상 지급 실패 --> S5_PARTIAL[S5: 부분 성공 기록<br>Status: REWARD_PARTIALLY_GRANTED]
-    S4 -- 보상 지급 실패 --> C1[보상 트랜잭션: S3 재고 원복]
-    S4 -- 지급 직전 사용자 비활성 --> C1_USER_INACTIVE[보상 트랜잭션: S3 재고 원복]
-
-    C1 --> FAIL_GRANT_ROLLED_BACK[실패: 지급 실패 후 롤백 완료<br>Status: FAILED_ROLLED_BACK]
-    C1_USER_INACTIVE --> FAIL_GRANT_USER_INACTIVE_ROLLED_BACK[실패: 사용자 비활성 롤백<br>Status: FAILED_ROLLED_BACK]
-
-    FAIL_USER_INACTIVE --> END_SAGA[Saga 종료]
-    FAIL_EVENT_STATE --> END_SAGA
-    FAIL_ALREADY_CLAIMED --> END_SAGA
-    FAIL_CONDITION_NOT_MET --> END_SAGA
-    FAIL_CONDITION_EXTERNAL --> END_SAGA
-    FAIL_INVENTORY_STOCK --> END_SAGA
-    FAIL_INVENTORY_ERROR --> END_SAGA
-    S5 --> END_SAGA
-    S5_PARTIAL --> END_SAGA
-    FAIL_GRANT_ROLLED_BACK --> END_SAGA
-    FAIL_GRANT_USER_INACTIVE_ROLLED_BACK --> END_SAGA
-```
-
-- **설명:** 본 다이어그램은 Saga의 주요 단계와 각 단계의 성공/실패에 따른 분기, 그리고 보상 트랜잭션으로 이어지는 경로 시각화. 각 단계 결과는 `UserRewardRequest` 상태 변경과 연동. (상세 설명은 다음 상태 전이 다이어그램 및 `docs/02_Data_Model.md` 참조).
-
-### 2.3. `UserRewardRequest` 상태 전이 다이어그램 (State Transition Diagram)
-
-`UserRewardRequest` 문서의 `status` 필드는 Saga 진행 상황의 핵심 지표. 가능한 모든 상태와 상태 간 전이 조건은 아래와 같음.
-
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> PENDING_VALIDATION
-    PENDING_VALIDATION --> VALIDATION_FAILED_USER_INACTIVE
-    PENDING_VALIDATION --> VALIDATION_FAILED_EVENT_NOT_ACTIVE
-    PENDING_VALIDATION --> VALIDATION_FAILED_ALREADY_CLAIMED
-    PENDING_VALIDATION --> PENDING_CONDITION_CHECK
-
-    PENDING_CONDITION_CHECK --> CONDITION_CHECK_FAILED_EXTERNAL
-    PENDING_CONDITION_CHECK --> CONDITION_NOT_MET
-    PENDING_CONDITION_CHECK --> PENDING_INVENTORY_ALLOCATION
-    PENDING_CONDITION_CHECK --> PENDING_REWARD_GRANT
-
-    PENDING_INVENTORY_ALLOCATION --> INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK
-    PENDING_INVENTORY_ALLOCATION --> INVENTORY_ALLOCATION_FAILED_CONCURRENCY
-    PENDING_INVENTORY_ALLOCATION --> INVENTORY_ALLOCATION_ERROR
-    PENDING_INVENTORY_ALLOCATION --> INVENTORY_ALLOCATED
-    
-    INVENTORY_ALLOCATED --> PENDING_REWARD_GRANT
-
-    PENDING_REWARD_GRANT --> REWARD_GRANT_FAILED_EXTERNAL
-    PENDING_REWARD_GRANT --> REWARD_GRANT_FAILED_USER_INACTIVE
-    PENDING_REWARD_GRANT --> REWARD_PARTIALLY_GRANTED
-    PENDING_REWARD_GRANT --> SUCCESS_ALL_GRANTED
-
-    REWARD_GRANT_FAILED_EXTERNAL --> PENDING_COMPENSATION_INVENTORY
-    REWARD_GRANT_FAILED_USER_INACTIVE --> PENDING_COMPENSATION_INVENTORY
-    INVENTORY_ALLOCATION_ERROR --> PENDING_COMPENSATION_INVENTORY
-    
-    PENDING_COMPENSATION_INVENTORY --> COMPENSATED_INVENTORY
-    COMPENSATED_INVENTORY --> FAILED_ROLLED_BACK
-    PENDING_COMPENSATION_INVENTORY --> COMPENSATION_FAILED_MANUAL_INTERVENTION_REQUIRED
-
-    state 최종_실패_처리 <<choice>>
-    VALIDATION_FAILED_USER_INACTIVE --> 최종_실패_처리
-    VALIDATION_FAILED_EVENT_NOT_ACTIVE --> 최종_실패_처리
-    VALIDATION_FAILED_ALREADY_CLAIMED --> 최종_실패_처리
-    CONDITION_CHECK_FAILED_EXTERNAL --> 최종_실패_처리
-    CONDITION_NOT_MET --> 최종_실패_처리
-    INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK --> 최종_실패_처리
-    INVENTORY_ALLOCATION_FAILED_CONCURRENCY --> 최종_실패_처리
-    FAILED_ROLLED_BACK --> 최종_실패_처리
-    최종_실패_처리 --> [*]
-
-    SUCCESS_ALL_GRANTED --> [*]
-    REWARD_PARTIALLY_GRANTED --> [*]
-    COMPENSATION_FAILED_MANUAL_INTERVENTION_REQUIRED --> [*]
-```
-
-- **설명:** 각 원은 `UserRewardRequest`의 `status` 값, 화살표는 상태 전이와 주요 원인(Saga 단계/이벤트) 의미.
-- Saga의 복잡한 상태 변화 추적 및 관리 가능.
-- 각 상태값 상세 의미는 `docs/02_Data_Model.md`의 `user_reward_requests` 컬렉션 설명 참조 또는 하단 표 추가.
-
-### 2.4. 현재 설계: 동기 API 호출 기반 Orchestration Saga 상세
-
-현재 시스템: Event Server의 `EventClaimsService`가 Orchestrator. Saga 각 단계 순차 실행, 외부 서비스(Auth Server, (가상) Game Data, (가상) Reward Fulfillment)는 동기식 HTTP API 호출(현재 Mock 처리)로 상호작용.
-
-- **S0: 요청 접수 및 초기화 (`EventClaimsService.initiateClaim`)**
-    - **입력:** `userId`, `eventIdString`, `idempotencyKey` (클라이언트 `X-Idempotency-Key`), `userRoles`, `username` (Gateway 헤더).
-    - **주요 로직:**
-        1. **멱등성 검증:** `idempotencyKey` 기반 `UserRewardRequest` 기존 요청 조회.
-            - **기존 요청 존재 시:** `status` 기반 응답 처리 (성공 시 이전 결과, 처리 중 시 알림, 실패 시 이전 실패 결과/정책적 재시도). 신규 Saga 생성 방지.
-        2. **대상 이벤트 조회:** `eventIdString` 기반 `events` 컬렉션 정보 조회. 부재 시 `NotFoundException`.
-        3. **신규 `UserRewardRequest` 생성:** `requestId`, `userId`, `eventId`, 초기 `status` (`PENDING_VALIDATION`), `currentSagaStep` (`VALIDATE_USER_AND_EVENT`), `eventSnapshot`, `rewardsToProcess` (초기 상태 `PENDING`) 등 포함 문서 생성.
-        4. **DB 저장:** 생성 문서 저장 (`requestId` unique 인덱스 활용 동시성 제어, 저장 실패 시 재조회 또는 `ConflictException`).
-        5. **Saga 실행 트리거:** 후속 `processRewardClaimSaga` 호출 (현재 동기 흐름 가정, 비동기 시 Kafka 커맨드 이벤트 발행 고려).
-    - **출력 (API 응답):** 생성/조회된 `UserRewardRequest` 초기 상태 정보 (또는 HTTP 202 Accepted).
-- **S1: 사용자 및 이벤트 유효성 검증 (`processRewardClaimSaga` 내)**
-    - **입력:** `UserRewardRequest` 객체.
-    - **주요 로직:**
-        1. **사용자 상태 검증 (Auth Server API 호출 - Mock 가정):** `request.userId` 사용, (가상) `/users/{userId}/status` API 호출, 사용자 활성 상태 확인.
-            - **실패/엣지:** Auth Server 응답 지연/오류 시 Timeout/Retry 후 `status`=`VALIDATION_FAILED_EXTERNAL_AUTH`, `failureReason` 기록, Saga 중단.
-            - 사용자 비활성 시 `status`=`VALIDATION_FAILED_USER_INACTIVE`, Saga 중단.
-        2. **이벤트 상태/기간 검증 (Event DB 조회):** `request.eventId` 사용, `events` 컬렉션 재조회 (또는 `eventSnapshot` 활용), 이벤트 `status`(`ACTIVE`), 기간 유효성 검증.
-            - 조건 미충족 시 `status`=`VALIDATION_FAILED_EVENT_NOT_ACTIVE`, Saga 중단.
-        3. **중복 수령 검증 (Event DB 조회):** `(userId, eventId)` 기준, 기 성공(`SUCCESS_ALL_GRANTED` 등) `UserRewardRequest` 확인.
-            - 중복 시 `status`=`VALIDATION_FAILED_ALREADY_CLAIMED`, Saga 중단.
-    - **출력 (상태 변경):** 모든 검증 통과 시 `request.status`=`PENDING_CONDITION_CHECK`, `currentSagaStep`=`CHECK_CONDITIONS` 업데이트 후 DB 저장.
-- **S2: 이벤트 조건 달성 여부 검증 (`processRewardClaimSaga` 내)**
-    - **입력:** `UserRewardRequest` 객체 (특히 `eventSnapshot.conditions`).
-    - **주요 로직:**
-        1. **조건 데이터 조회 ((가상) Game Data Service API 호출 - Mock 가정):** `eventSnapshot.conditions` 명시 조건 유형 기반, 필요 사용자 활동 데이터 (가상) Game Data Service 조회.
-            - **실패/엣지:** 외부 서비스 응답 지연/오류 시 Timeout/Retry 후 `status`=`CONDITION_CHECK_FAILED_EXTERNAL`, `failureReason` 기록, Saga 중단.
-        2. **조건 충족 판정:** 조회 데이터와 `eventSnapshot.conditions` 비교, 최종 조건 충족 여부 판정.
-            - 조건 미충족 시 `status`=`CONDITION_NOT_MET`, Saga 중단.
-    - **출력 (상태 변경):** 조건 충족 시, 한정 수량 보상 존재 여부에 따라 `status`를 `PENDING_INVENTORY_ALLOCATION` (한정) 또는 `PENDING_REWARD_GRANT` (무제한)로, `currentSagaStep`을 각각 `ALLOCATE_INVENTORY` 또는 `GRANT_REWARDS`로 업데이트 후 DB 저장.
-- **S3: 보상 재고 확인 및 반영 (단순화된 DB 업데이트, `processRewardClaimSaga` 내)**
-    - **입력:** `UserRewardRequest` 객체 (`eventSnapshot.rewards` 또는 `rewardsToProcess`).
-    - **주요 로직 (각 한정 수량 보상 대상):**
-        1. `events` 컬렉션 내 해당 보상(`rewardId`)의 `remainingStock` 조건부 차감 시도.
-            - **실패/엣지 (재고 부족/DB 업데이트 경쟁 실패):** `status`=`INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK` (또는 `..._CONCURRENCY`/`..._ERROR`), `failureReason` 기록. **S3 보상 트랜잭션 실행** (기 차감 다른 보상 재고 원복). Saga 중단.
-        2. `rewardsToProcess` 내 해당 보상 상태 `INVENTORY_ALLOCATED` 업데이트.
-    - **출력 (상태 변경):** 모든 필요 보상 재고 확보 시 `status`=`PENDING_REWARD_GRANT`, `currentSagaStep`=`GRANT_REWARDS` 업데이트 후 DB 저장.
-    - **S3 보상 트랜잭션 (S3c):** 차감 `remainingStock` 원복 (DB 업데이트).
-- **S4: 실제 보상 지급 ((가상) Reward Fulfillment Service API 호출 - Mock, `processRewardClaimSaga` 내)**
-    - **입력:** `UserRewardRequest` 객체 (`rewardsToProcess` 중 `INVENTORY_ALLOCATED` 상태 보상).
-    - **주요 로직 (각 지급 대상 보상 대상):**
-        1. **사용자 상태 최종 확인 (Auth Server API 호출 - Mock 가정):** 지급 직전 사용자 활성 상태 재확인.
-            - 비활성 시 해당 보상 `rewardsToProcess[i].grantStatus`=`FAILED_USER_INACTIVE`. 전체 Saga 롤백 절차 진입 (`status`=`REWARD_GRANT_FAILED_USER_INACTIVE`).
-        2. (가상) Reward Fulfillment Service API 호출 (예: `POST /grant-item`).
-            - **실패/엣지:** 외부 시스템 응답 지연/오류 시 Timeout/Retry 후 해당 보상 `rewardsToProcess[i].grantStatus`=`FAILED_EXTERNAL`, `failureReason` 기록.
-        3. 성공 시 해당 보상 `rewardsToProcess[i].grantStatus`=`SUCCESS`, `processedAt` 기록.
-    - **출력 (상태 변경 및 S4 보상 트랜잭션):**
-        - **전체 성공 시:** `status`=`SUCCESS_ALL_GRANTED`, `currentSagaStep`=`COMPLETED`, `rewardsGrantedAt` 기록. Saga 성공 종료.
-        - **부분 성공/실패 (All-or-Nothing 정책 가정):** `status`=`REWARD_GRANT_FAILED_EXTERNAL` (또는 `..._USER_INACTIVE`) 등 변경. **S4 보상 트랜잭션 실행** (기 성공 지급 보상 회수 시도 - Mock) 및 **S3 보상 트랜잭션 실행** (할당 재고 원복). 최종 `status`=`FAILED_ROLLED_BACK`. Saga 실패 종료.
-        - **(정책) 부분 성공 허용 시:** `status`=`REWARD_PARTIALLY_GRANTED`. 실패 보상 부분 롤백. Saga 부분 성공 종료.
-    - **S4 보상 트랜잭션 (S4c):** 기 성공 지급 보상 회수 시도 로직 (Mock).
-- **S5: 최종 처리 및 완료 (`processRewardClaimSaga` 내)**
-    - Saga 최종 상태(`SUCCESS_ALL_GRANTED`, `FAILED_ROLLED_BACK`, `REWARD_PARTIALLY_GRANTED` 등) `UserRewardRequest` 확정 기록.
-    - 필요시 감사 로그 생성.
-
-### 2.5. 현재 설계(동기 API 기반 Orchestration Saga)의 어려움 및 한계점
-
-현재 제안된 동기식 API 호출 기반 Orchestration Saga 방식은 명확한 제어 흐름을 제공하나, 몇 가지 본질적인 어려움과 한계점 내포. 이는 특히 시스템 규모 확장 또는 트랜잭션 복잡도 증가 시 더욱 두드러질 수 있음.
-
-1. **롤백(보상 트랜잭션) 로직의 중앙 집중화 및 복잡성 증가:**
-    - **중앙 집중화된 오류 처리 부담:** Saga 조정자(Orchestrator, 현재 `EventClaimsService`)의 각 단계 실패 감지 및 순차적 보상 트랜잭션 실행 책임. 이는 Orchestrator 코드 복잡도 증가 및 유지보수 부담 야기. (새 Saga 단계 추가/변경 시 보상 로직 동시 수정 필요).
-    - **구현의 어려움:** 각 서비스 호출(S1-S4 등)에 대한 보상 로직(API 호출, DB 롤백)의 Orchestrator 직접 관리. 예: S4 실패 시 S3 및 이전 단계 변경사항의 순차적, 성공적 롤백 확인 필요. 오류 발생 가능성 높은 지점.
-    - **상태 관리의 복잡성:** 실패 지점 및 기완료 작업의 정확한 추적, 올바른 보상 조치를 위한 상태 관리의 중요성 증대 및 Orchestrator 로직 복잡화.
-2. **서비스 간 강한 결합(Tight Coupling) 및 성능 병목 현상:**
-    - **실행 시간 의존성:** `EventClaimsService`의 외부 서비스(Auth, Game Data, Reward Fulfillment) 동기 호출 방식은 호출 대상 서비스 응답 지연 시 전체 Saga 처리 시간 직접적 증가 야기. 여러 외부 시스템 순차 통신 시 지연 누적으로 사용자 경험 저하.
-    - **가용성 의존성:** 호출 대상 서비스 장애 시 Orchestrator 블로킹 또는 타임아웃 후 Saga 실패 처리. 특정 서비스 장애가 전체 보상 시스템 가용성에 직접 영향 (강결합).
-    - **Resilience 패턴 구현 부담:** 각 동기 API 호출 지점마다 Timeout, Retry(멱등성 보장 시), Circuit Breaker 등 Resilience 패턴의 Orchestrator 또는 호출 클라이언트 라이브러리 수준 개별 적용 및 관리 필요.
-3. **긴 트랜잭션(Long-Lived Transactions)으로 인한 자원 점유:**
-    - 전체 단계 동기 처리로 Saga 완료까지 관련 시스템 자원(DB 커넥션, 서버 스레드 등) 점유. 트랜잭션 처리량 증가 시 시스템 전체 성능 저하 유발 가능성.
-
-위 어려움들은 "일일이 트랜잭션 다 되돌리는 게 너무 빡세다"는 통찰과 일치. 시스템 복잡도/트랜잭션 빈도 낮을 시 관리 가능하나, 서비스 성장에 따라 유지보수 및 확장 어려움 직면.
-
-### 2.6. 향후 확장 설계: Apache Kafka 도입을 통한 Saga 개선 방안
-
-동기 API 기반 Saga 한계 극복 및 시스템 확장성, 유연성, 서비스 간 결합도 개선을 위한 핵심 방안으로 Apache Kafka 등 메시지 큐 도입을 통한 이벤트 기반 아키텍처(EDA) 점진적 전환 고려.
-
-- **핵심 목표:**
-    - 서비스 책임 명확 분리 및 직접 동기 호출 의존성 제거 통한 **느슨한 결합(Loose Coupling)** 달성.
-    - 시간 소요 작업 및 외부 시스템 의존 작업의 **비동기 이벤트 처리** 전환 통한 시스템 응답성 및 처리량 향상.
-    - Saga 각 단계 이벤트 정의, 실패 시 **보상 이벤트** 기반 각 서비스 책임 하의 롤백 로직 수행으로 복잡성 분산.
-- **개선 방안 1: Choreography 기반 Saga (이벤트 기반 완전 분산 처리)**
-    - **개념:** 중앙 Orchestrator 부재. 각 마이크로서비스의 로컬 트랜잭션 완료 후 Kafka로 이벤트 발행(Publish). 타 서비스는 해당 이벤트 구독(Subscribe) 후 다음 작업 수행 및 필요시 추가 이벤트 발행 (연쇄적 진행).
-    - **장점:** 서비스 간 결합도 극소화, 각 서비스 독립적 개발/배포/확장 용이성 극대화. 특정 서비스 장애의 타 서비스 영향 최소화 (시간적 분리).
-    - **단점 및 과제 적용 시 고려사항:** 전체 Saga 흐름 추적 및 모니터링, 디버깅 복잡성 증가. 타임아웃 처리, 전체 Saga 실패 감지, 최종 롤백 조정 등의 로직 복잡화. (본 과제에서는 개념적 이해 제시 수준 권장).
-- **개선 방안 2: Orchestration + Event 기반 Saga (하이브리드 - 현실적 절충안)**
-    - **개념:** `EventClaimsService` 등 Orchestrator 역할 유지. 단, 시간 소요 또는 외부 시스템 의존 단계 실행을 동기 API 호출 대신, 해당 작업 요청 **커맨드(Command)성 이벤트를 Kafka로 발행**. 작업 결과는 **결과(Result) 이벤트를 Kafka로 구독**하여 다음 단계 진행 또는 실패 처리.
-    - **장점:**
-        - **흐름 제어 명확성 유지:** Orchestrator의 전체 Saga 흐름 관리로 Choreography 대비 이해 및 제어 용이.
-        - **비동기 이점 활용:** 장기 실행 작업 비동기화로 API 응답성 및 시스템 자원 효율성 향상.
-        - **롤백 로직 유연성:** 실패 시 Orchestrator의 보상 커맨드 이벤트(예: `CompensateInventoryCommand`) 발행. 담당 서비스/컨슈머의 해당 이벤트 구독 후 자체 작업 되돌림. "일일이 되돌리는" 로직의 Orchestrator 집중 완화 및 담당 서비스로 책임 분산 (중앙 통제는 유지).
-        - **Resilience 향상:** Kafka의 메시지 버퍼 역할로 특정 커맨드 처리 서비스 일시 다운 시에도 커맨드 이벤트 유실 방지 및 추후 처리 가능. 각 컨슈머의 자체 재시도 로직 구현.
-    - **Kafka 도입 시 "롤백" 처리 변화:** Orchestrator는 보상 로직 직접 수행 대신, "재고 원복 지시", "지급 포인트 회수 지시" 등 **보상 커맨드 이벤트 발행** 역할. 실제 롤백은 해당 커맨드 구독 서비스/컨슈머가 담당. Orchestrator 복잡도 감소 및 각 서비스의 책임 영역 내 롤백 수행으로 독립성 증진. (단, 보상 커맨드 이벤트 및 컨슈머 로직의 신중한 설계 필요).
-    - **Kafka 이벤트 페이로드 예시 (Orchestration + Event 기반):**
-        - **커맨드 이벤트 (Event Server Orchestrator → Kafka → 담당 컨슈머):**
-            - `CheckEventConditionsCommand`: `{ "requestId": "uuid", "userId": "string", "eventId": "string", "eventConditionsSnapshot": {...} }`
-            - `AllocateInventoryCommand`: `{ "requestId": "uuid", "userId": "string", "eventId": "string", "rewardsToAllocate": [{ "rewardId": "string", "quantity": 1 }] }`
-            - `GrantRewardItemCommand`: `{ "requestId": "uuid", "userId": "string", "itemDetails": {...}, "idempotencyKeyForGrant": "uuid" }`
-            - `CompensateInventoryCommand`: `{ "requestId": "uuid", "eventId": "string", "rewardsToRollback": [{ "rewardId": "string", "quantity": 1 }] }`
-        - **결과 이벤트 (담당 컨슈머 → Kafka → Event Server Orchestrator):**
-            - `EventConditionsCheckedEvent`: `{ "requestId": "uuid", "met": true/false, "reasonIfFalse": "string", "checkedDataSnapshot": {...} }`
-            - `InventoryAllocatedEvent`: `{ "requestId": "uuid", "allocationStatus": "SUCCESS" / "OUT_OF_STOCK" / "ERROR", "allocatedRewards": [...], "failureReason": "string" }`
-            - `RewardItemGrantedEvent`: `{ "requestId": "uuid", "grantStatus": "SUCCESS" / "FAILED", "rewardId": "string", "failureReason": "string", "transactionIdFromProvider": "string" }`
-            - `InventoryCompensatedEvent`: `{ "requestId": "uuid", "compensationStatus": "SUCCESS" / "FAILED", "rolledBackRewards": [...] }`
-
-이러한 Kafka 기반 비동기 Saga 처리는 현재 시스템의 한계 극복 및 "실제 프로덕션 코드" 질문에 대한 더욱 설득력 있는 답변 방향 제시.
-
-## 3. API 멱등성 확보 전략 (`X-Idempotency-Key`)
-
-사용자 보상 요청 API (`POST /event-claims/{eventId}/claim`) 등 시스템 상태 변경 및 재시도 시 부작용 발생 가능 API의 멱등성 보장 필수.
+사용자 보상 요청 처리 Saga의 전체적인 진행 흐름. `UserRewardRequest`의 `status`와 `currentSagaStep` 변화와 밀접하게 연관. (실제 `EventClaimsService`의 `processRewardClaimSaga` 메서드 흐름 기반)
 
 ```mermaid
 graph TD
-    Client -- "1. 요청 IdempotencyKey 포함" --> Server
+    direction LR
+    S0["S0: 요청 접수 및 초기화<br>(Idempotency Key 검증,<br>UserRewardRequest 생성:<br>PENDING_VALIDATION,<br>Step: S0_REQUEST_INITIALIZED)"] -- initiateClaim --> S1_LOGIC["processRewardClaimSaga 시작"];
+
+    S1_LOGIC --> S1_STATUS_CHECK{Status == PENDING_VALIDATION?};
+    S1_STATUS_CHECK -- 예 --> S1_EXEC["S1: 사용자/이벤트 유효성 검증<br>(Mock Auth API, Event DB 조회<br>Step: S1_VALIDATE_USER_EVENT)"];
+    S1_STATUS_CHECK -- 아니오 --> S2_STATUS_CHECK;
+
+    S1_EXEC -- 유효성 통과 --> S1_SUCCESS["Status: PENDING_CONDITION_CHECK<br>DB 저장"];
+    S1_EXEC -- 사용자 비활성 --> FAIL_USER_INACTIVE["실패: 사용자 비활성<br>(Status: VALIDATION_FAILED_USER_INACTIVE)"];
+    S1_EXEC -- 이벤트 비활성/종료 --> FAIL_EVENT_STATE["실패: 이벤트 상태 오류<br>(Status: VALIDATION_FAILED_EVENT_NOT_ACTIVE)"];
+    S1_EXEC -- 이미 수령 --> FAIL_ALREADY_CLAIMED["실패: 기수령<br>(Status: VALIDATION_FAILED_ALREADY_CLAIMED)"];
+
+    S1_SUCCESS --> S2_STATUS_CHECK{Status == PENDING_CONDITION_CHECK?};
+    S2_STATUS_CHECK -- 예 --> S2_EXEC["S2: 이벤트 조건 달성 검증<br>(Mock Game Data API 조회<br>Step: S2_CHECK_CONDITIONS)"];
+    S2_STATUS_CHECK -- 아니오 --> S3_STATUS_CHECK;
+
+    S2_EXEC -- 조건 충족 & 한정수량O --> S3_INV["S3: 재고 반영 (단순화)<br>(Event DB 업데이트<br>Step: S3_ALLOCATE_INVENTORY)"];
+    S2_EXEC -- 조건 충족 & 무제한 --> S4_NO_INV["S4: 보상 지급 실행 (재고처리X)<br>(Mock Reward Fulfillment API<br>Step: S4_GRANT_REWARDS)"];
+    S2_EXEC -- 조건 미충족 --> FAIL_CONDITION_NOT_MET["실패: 조건 미충족<br>(Status: CONDITION_NOT_MET)"];
+    S2_EXEC -- 조건정보 없음/오류 --> FAIL_CONDITION_EXTERNAL["실패: 조건 정보 오류<br>(Status: CONDITION_CHECK_FAILED_EXTERNAL)"];
+
+    S3_INV -- 재고 확보 성공 --> S4["S4: 보상 지급 실행 (Mock)<br>(Mock Reward Fulfillment API<br>Step: S4_GRANT_REWARDS)"];
+    S3_INV -- 재고 부족/오류 --> C_INV_FAIL["compensateInventory 호출"];
+    C_INV_FAIL --> FAIL_INVENTORY["실패: 재고 부족/오류<br>(Status: FAILED_ROLLED_BACK)"];
+
+    S4 -- 모든 보상 지급 성공 --> S5["S5: 최종 성공 기록<br>(Status: SUCCESS_ALL_GRANTED<br>Step: S5_COMPLETED)"];
+    S4_NO_INV -- 모든 보상 지급 성공 --> S5;
+    S4 -- 지급 실패 (사용자 비활성 포함) --> C_GRANT_FAIL["compensateInventory(true) 호출"];
+    S4_NO_INV -- 지급 실패 (사용자 비활성 포함) --> FAIL_GRANT_NO_INV["실패: 지급 실패 (롤백대상 재고X)<br>(Status: REWARD_GRANT_FAILED_*)"];
+
+    C_GRANT_FAIL --> FAIL_GRANT_ROLLED_BACK["실패: 지급 실패 후 롤백 완료<br>(Status: FAILED_ROLLED_BACK<br>Step: S5_COMPLETED)"];
+
+    FAIL_USER_INACTIVE --> END_SAGA[Saga 종료];
+    FAIL_EVENT_STATE --> END_SAGA;
+    FAIL_ALREADY_CLAIMED --> END_SAGA;
+    FAIL_CONDITION_NOT_MET --> END_SAGA;
+    FAIL_CONDITION_EXTERNAL --> END_SAGA;
+    FAIL_INVENTORY --> END_SAGA;
+    S5 --> END_SAGA;
+    FAIL_GRANT_ROLLED_BACK --> END_SAGA;
+    FAIL_GRANT_NO_INV --> END_SAGA;
+```
+
+- **설명:** `EventClaimsService`의 `initiateClaim`과 `processRewardClaimSaga` 메서드의 실제 로직 흐름을 반영하여,
+- 각 단계의 상태 확인(`if (currentRequest.status === ...)`), 주요 작업, 성공/실패 시 상태 변경, 그리고 보상 트랜잭션(`compensateInventory`) 호출 지점을 시각화합니다.
+
+### 2.3. `UserRewardRequest` 상태 전이 다이어그램 (State Transition Diagram)
+
+- `UserRewardRequest` 문서의 `status` 필드는 Saga 진행 상황의 핵심 지표.
+- 가능한 모든 상태와 상태 간 전이 조건은 아래와 같음.
+
+```mermaid
+stateDiagram-v2
+direction LR
+
+[*] --> PENDING_VALIDATION: initiateClaim
+
+PENDING_VALIDATION --> VALIDATION_FAILED_USER_INACTIVE: 사용자 비활성
+PENDING_VALIDATION --> VALIDATION_FAILED_EVENT_NOT_ACTIVE: 이벤트 비활성 또는 종료
+PENDING_VALIDATION --> VALIDATION_FAILED_ALREADY_CLAIMED: 이미 수령함
+PENDING_VALIDATION --> PENDING_CONDITION_CHECK: 기본 유효성 통과
+
+PENDING_CONDITION_CHECK --> CONDITION_CHECK_FAILED_EXTERNAL: 외부 조건 오류
+PENDING_CONDITION_CHECK --> CONDITION_NOT_MET: 조건 미달성
+PENDING_CONDITION_CHECK --> PENDING_INVENTORY_ALLOCATION: 조건 충족 (재고 있음)
+PENDING_CONDITION_CHECK --> PENDING_REWARD_GRANT: 조건 충족 (무제한 보상만 존재)
+
+PENDING_INVENTORY_ALLOCATION --> INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK: 재고 부족 또는 오류
+PENDING_INVENTORY_ALLOCATION --> PENDING_REWARD_GRANT: 재고 할당 성공
+
+PENDING_REWARD_GRANT --> REWARD_GRANT_FAILED_EXTERNAL: 외부 지급 실패
+PENDING_REWARD_GRANT --> REWARD_GRANT_FAILED_USER_INACTIVE: 지급 전 사용자 비활성
+PENDING_REWARD_GRANT --> SUCCESS_ALL_GRANTED: 모든 보상 지급 성공
+PENDING_REWARD_GRANT --> FAILED_ROLLED_BACK: 일부 실패로 전체 롤백
+
+INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK --> FAILED_ROLLED_BACK: 재고 롤백 후 실패
+
+state "최종 실패 처리" as FINAL_FAILURE <<choice>>
+
+VALIDATION_FAILED_USER_INACTIVE --> FINAL_FAILURE
+VALIDATION_FAILED_EVENT_NOT_ACTIVE --> FINAL_FAILURE
+VALIDATION_FAILED_ALREADY_CLAIMED --> FINAL_FAILURE
+CONDITION_CHECK_FAILED_EXTERNAL --> FINAL_FAILURE
+CONDITION_NOT_MET --> FINAL_FAILURE
+FAILED_ROLLED_BACK --> FINAL_FAILURE
+
+FINAL_FAILURE --> [*]
+SUCCESS_ALL_GRANTED --> [*]
+COMPENSATION_FAILED_MANUAL_INTERVENTION_REQUIRED --> [*]
+
+```
+
+- **설명:** 각 원은 `UserRewardRequest`의 `status` 값을 나타내며, 화살표는 상태 전이와 주요 원인(Saga 단계/이벤트)을 의미.
+- `INVENTORY_ALLOCATED`는 `UserRewardRequest.rewardsToProcess[i].grantStatus`로 관리하고,
+  전체 요청의 `status`는 `PENDING_REWARD_GRANT`로 진행되는 것으로 변경되었습니다.
+- 실패 후 `compensateInventory`를 거쳐 최종적으로 `FAILED_ROLLED_BACK` 상태로 수렴되는 것을 명확히 합니다.
+
+### 2.4. 현재 설계: 동기 API 호출 기반 Orchestration Saga 상세 (`EventClaimsService` 로직 기반)
+
+`EventClaimsService`는 Saga Orchestrator로서, `processRewardClaimSaga` 메서드 내에서 각 단계를 순차적으로 진행한다.
+
+`UserRewardRequest` 문서를 통해 상태를 지속적으로 관리하며, 실패 시 `compensateInventory`와 같은 보상 트랜잭션을 호출한다. 외부 서비스 연동은 Mock 인터페이스를 통해 시뮬레이션한다.
+
+- **S0: 요청 접수 및 초기화 (`initiateClaim` 메서드)**
+    - **입력:** `userId`, `eventIdString`, `idempotencyKey`, `userRoles`, `username`.
+    - **주요 로직:**
+        1. **멱등성 검증:** `requestId` (from `idempotencyKey`)로 `UserRewardRequest` 조회. 기존 요청 발견 시 해당 요청의 현재 `status`에 따라 즉시 반환 (성공, 실패, 처리 중 상태 구분).
+        2. 대상 `Event` 문서(`eventModel.findById`) 조회. 유효성(존재 여부) 확인.
+        3. 신규 `UserRewardRequest` 문서 생성: `requestId`, `userId`, `eventId`, `eventSnapshot` (이벤트명, 조건, 보상 목록 스냅샷), `status: 'PENDING_VALIDATION'`, `currentSagaStep: 'S0_REQUEST_INITIALIZED'`, `rewardsToProcess` (지급 대상 보상 목록 및 각 보상별 초기 `grantStatus: 'PENDING'`) 초기화.
+        4. DB 저장: 생성된 `UserRewardRequest` 문서 저장. (`requestId` unique 인덱스로 동시 요청에 의한 중복 생성 방지).
+        5. **Saga 실행:** `processRewardClaimSaga(savedRequest)` 호출. (현재 동기적 실행 후 최종 결과 반환)
+    - **출력 (API 응답):** Saga 처리 후 최종 업데이트된 `UserRewardRequest` 문서.
+- **S1: 사용자 및 이벤트 유효성 검증 (`processRewardClaimSaga` 내)**
+    - `currentSagaStep = 'S1_VALIDATE_USER_EVENT'`.
+    - `mockAuthService.isUserActive(userId)` 호출. 사용자 비활성 시 `status = 'VALIDATION_FAILED_USER_INACTIVE'`, Saga 중단.
+    - `eventModel.findById(eventId)`로 최신 이벤트 정보 조회. 이벤트 `status`가 'ACTIVE'가 아니거나 기간 만료 시 `status = 'VALIDATION_FAILED_EVENT_NOT_ACTIVE'`, Saga 중단.
+    - `userRewardRequestModel.findOne({ userId, eventId, status: 'SUCCESS_ALL_GRANTED' })`로 중복 수령 검증. 중복 시 `status = 'VALIDATION_FAILED_ALREADY_CLAIMED'`, Saga 중단.
+    - 모든 검증 통과 시 `status = 'PENDING_CONDITION_CHECK'`. 각 단계 후 `request.save()`.
+- **S2: 이벤트 조건 달성 여부 검증 (`processRewardClaimSaga` 내)**
+    - `currentSagaStep = 'S2_CHECK_CONDITIONS'`.
+    - `request.eventSnapshot.conditions` 기반, `mockGameDataService.checkConditions(userId, conditions)` 호출.
+    - 조건 미달성 시 `status = 'CONDITION_NOT_MET'`, Saga 중단. `eventSnapshot.conditions` 부재 시 `CONDITION_CHECK_FAILED_EXTERNAL` 처리.
+    - 성공 시, `rewardsToProcess` 내 한정 수량 보상 존재 여부 확인 후 `status`를 `PENDING_INVENTORY_ALLOCATION` 또는 `PENDING_REWARD_GRANT`로 설정.
+- **S3: 보상 재고 확인 및 반영 (`processRewardClaimSaga` 내, 한정 수량 보상 존재 시)**
+    - `currentSagaStep = 'S3_ALLOCATE_INVENTORY'`.
+    - 최신 `Event` 문서 재조회 (`eventForInventory`).
+    - `rewardsToProcess` 순회. 각 `snapshotReward`에 대해 `eventForInventory.rewards`에서 일치하는 `eventReward` 탐색.
+        - `eventReward` 부재 시 오류 처리 (`FAILED_INVENTORY_ERROR`로 `grantStatus` 변경 후 전체 롤백).
+        - 한정 수량 보상(`totalStock != -1`): `remainingStock > 0` 확인 후 `eventModel.updateOne`으로 `rewards.$.remainingStock` 조건부 차감.
+            - 업데이트 성공: `rewardToProcess.grantStatus = 'INVENTORY_ALLOCATED'`.
+            - 실패(재고 부족/경쟁): `rewardToProcess.grantStatus = 'FAILED_OUT_OF_STOCK'`, 전체 재고 할당 실패(`allStockAllocated = false`), 루프 중단.
+        - 무제한 보상: `rewardToProcess.grantStatus = 'INVENTORY_ALLOCATED'`.
+    - `currentRequest.markModified('rewardsToProcess')`.
+    - `allStockAllocated == false` 시: `status = 'INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK'`, `compensateInventory(eventForInventory)` 호출 후 `status = 'FAILED_ROLLED_BACK'`. Saga 중단.
+    - 전체 성공 시: `status = 'PENDING_REWARD_GRANT'`.
+- **S4: 실제 보상 지급 (Mock, `processRewardClaimSaga` 내)**
+    - `currentSagaStep = 'S4_GRANT_REWARDS'`.
+    - `rewardsToProcess` 중 `grantStatus = 'INVENTORY_ALLOCATED'`인 보상에 대해:
+        1. `mockAuthService.isUserActive(userId)`로 사용자 상태 최종 확인. 비활성 시 `status = 'REWARD_GRANT_FAILED_USER_INACTIVE'`, 전체 롤백 플래그 설정 후 루프 중단.
+        2. `mockRewardFulfillmentService.grantReward(userId, rewardDetails)` 호출.
+        3. 결과에 따라 `rewardsToProcess` 각 항목의 `grantStatus`를 `SUCCESS` 또는 `FAILED_EXTERNAL`로, `processedAt`, `failureReason` 업데이트. 실패 시 전체 롤백 플래그 설정 후 루프 중단.
+    - `currentRequest.markModified('rewardsToProcess')`.
+    - `allRewardsGrantedSuccessfully == false` 시: `status` 업데이트 (예: `REWARD_GRANT_FAILED_EXTERNAL`), `compensateInventory(event, true)` 호출 후 `status = 'FAILED_ROLLED_BACK'`. Saga 중단.
+    - 모든 보상 지급 성공 시: `status = 'SUCCESS_ALL_GRANTED'`, `rewardsGrantedAt` 기록.
+- **S5: 최종 처리 (`processRewardClaimSaga` 내)**
+    - `currentSagaStep = 'S5_COMPLETED'`.
+    - `UserRewardRequest` 최종 상태 로깅 및 저장.
+- **Saga 전체 예외 처리 (`processRewardClaimSaga` 최상단 `try-catch`):**
+    - 예상치 못한 오류 발생 시, `status = 'COMPENSATION_FAILED_MANUAL_INTERVENTION_REQUIRED'`, `failureReason` 기록 후 DB에서 최신 상태의 문서를 다시 읽어와 안전하게 저장 시도.
+- **보상 트랜잭션 (`compensateInventory` 메서드):**
+    - 입력: `UserRewardRequestDocument`, `EventDocument`, `isGrantFailureRollback` (S4 실패 롤백 여부).
+    - 로직: `rewardsToProcess`를 순회하며, `grantStatus`가 `INVENTORY_ALLOCATED`였거나 (S3 실패 시나리오), `isGrantFailureRollback`이 `true`이고 `grantStatus`가 `SUCCESS`였던 (S4에서 지급 성공 후 전체 롤백 시나리오) 한정 수량 보상에 대해 `eventModel.updateOne`으로 `rewards.$.remainingStock` 1 증가. 롤백된 보상의 `grantStatus`를 `ROLLED_BACK_INVENTORY`로 업데이트. `request.markModified('rewardsToProcess')`.
+
+### 2.5. 현재 설계(동기 API 기반 Orchestration Saga)의 어려움 및 한계점
+
+현재 구현된 동기식 API 호출 기반의 Orchestration Saga는 제어 흐름이 명확하다는 장점이 있으나, 다음과 같은 본질적인 어려움과 한계점을 지닙니다. 특히 시스템의 규모가 커지고 트랜잭션의 복잡도가 증가할수록 이러한 문제점들은 더욱 심화될 수 있습니다.
+
+1. **롤백(보상 트랜잭션) 로직의 중앙 집중화 및 복잡성 증대:**
+    - **오류 처리 책임 집중:** Saga의 모든 단계를 총괄하는 Orchestrator(본 설계에서는 `EventClaimsService`)는 각 로컬 트랜잭션의 실패를 감지하고, 그에 따른 보상 트랜잭션을 순차적으로 실행해야 하는 모든 책임을 지게 됩니다. 이는 Orchestrator의 코드 복잡도를 현저히 높이며, 새로운 Saga 단계가 추가되거나 기존 로직이 변경될 때마다 관련된 보상 로직 또한 함께 수정하고 검증해야 하는 유지보수 부담을 야기합니다.
+    - **구현의 난이도:** 각 서비스 호출(S1부터 S4에 이르는 사용자 검증, 조건 확인, 재고 차감, 보상 지급 등)에 대한 보상 로직(예: 재고 원복 DB 업데이트, 지급된 보상 회수 API 호출 등)을 Orchestrator가 일일이 관리하고 호출 순서 및 성공 여부를 확인해야 합니다. 이 과정에서 누락이나 오류가 발생할 가능성이 높으며, 디버깅 또한 쉽지 않습니다.
+    - **상태 관리의 복잡성:** 실패가 발생한 정확한 지점과 이미 성공적으로 완료된 작업들을 명확히 추적하여, 올바른 보상 조치를 정확한 순서로 적용하기 위한 상태 관리가 매우 중요해집니다. 이는 Orchestrator의 로직을 더욱 복잡하게 만드는 요인으로 작용합니다.
+2. **서비스 간 강한 결합(Tight Coupling) 및 성능 병목 가능성:**
+    - **실행 시간의 직접적 의존성:** `EventClaimsService`가 Auth Server, (가상) Game Data Service, (가상) Reward Fulfillment Service 등 외부 서비스를 동기적으로 호출하는 현재 방식은, 호출 대상 서비스 중 단 하나라도 응답이 지연될 경우 전체 보상 요청 Saga의 처리 시간이 직접적으로 늘어나는 결과를 초래합니다. 여러 외부 시스템과 순차적으로 통신해야 하는 복잡한 Saga의 경우, 이러한 지연은 누적되어 최종 사용자의 경험에 부정적인 영향을 미칠 수 있습니다.
+    - **가용성의 연쇄적 영향:** 호출 대상 서비스 중 하나라도 장애가 발생하여 정상적인 응답을 반환하지 못하면, Orchestrator는 해당 단계에서 더 이상 진행하지 못하고 블로킹되거나, 설정된 타임아웃 이후에 Saga를 강제로 실패시켜야 합니다. 이는 특정 외부 서비스의 장애가 전체 보상 시스템의 가용성에 직접적인 영향을 미치는 강한 결합 상태를 의미하며, 시스템 전체의 안정성을 저해할 수 있습니다.
+    - **Resilience 패턴 구현 부담의 집중:** 각 동기 API 호출 지점마다 Timeout 설정, 제한적 재시도(Retry) 로직 (호출 대상 API가 멱등성을 보장할 경우), 그리고 반복적인 실패에 대한 Circuit Breaker 패턴 등을 Orchestrator 내부 또는 각 API 호출 클라이언트 라이브러리 수준에서 개별적으로 구현하고 관리해야 하는 부담이 있습니다.
+3. **긴 트랜잭션(Long-Lived Transactions)으로 인한 시스템 자원 점유:**
+    - Saga의 모든 단계가 동기적으로 처리되므로, 첫 단계부터 최종 완료 또는 실패까지 관련된 시스템 자원(예: 데이터베이스 커넥션, 서버의 요청 처리 스레드 또는 이벤트 루프 점유)이 장시간 동안 유지될 수 있습니다. 동시에 처리해야 할 보상 요청 트랜잭션의 수가 증가할 경우, 이는 시스템 전체의 가용 자원을 빠르게 소진시켜 성능 저하를 유발하거나 심지어 서비스 불능 상태로 이어질 수 있습니다.
+
+위에서 언급된 어려움들은 "일일이 트랜잭션 다 되돌리는 게 너무 빡세다"는 사용자님의 직관적인 우려와 정확히 일치합니다. 시스템의 초기 단계나 트랜잭션의 복잡도 및 빈도가 낮은 경우에는 현재의 동기식 Orchestration 방식으로 관리 가능할 수 있으나, 서비스가 성장하고 이벤트 및 보상 시스템의 역할이 중요해짐에 따라 이러한 구조는 유지보수성과 확장성 측면에서 심각한 도전에 직면하게 될 가능성이 높습니다.
+
+### 2.6. 향후 확장 설계: Apache Kafka 도입을 통한 Saga 개선 방안
+
+현재 설계된 동기 API 기반 Orchestration Saga의 한계점을 극복하고, 시스템의 확장성, 유연성,
+
+그리고 서비스 간 결합도를 획기적으로 개선하기 위한 핵심 전략으로 메시지 큐 시스템을 도입하여 이벤트 기반 아키텍처(Event-Driven Architecture, EDA)로 점진적으로 전환하는 것을 고려.
+
+- **핵심 목표:**
+    - 각 마이크로서비스의 책임을 명확히 분리하고, 서비스 간 직접적인 동기 호출 의존성을 제거함으로써 **느슨한 결합(Loose Coupling)**을 달성합니다.
+    - 시간이 많이 소요되거나 외부 시스템에 의존적인 작업을 **비동기 이벤트 처리**로 전환하여, API 응답성을 향상시키고 시스템 전체의 처리량(Throughput)을 증대시킵니다.
+    - Saga의 각 단계를 독립적인 이벤트로 정의하고, 실패 발생 시 각 서비스가 **보상 이벤트**를 통해 자신의 책임을 다하도록 함으로써 롤백 로직의 복잡성을 효과적으로 분산시킵니다.
+- **개선 방안 1: Choreography 기반 Saga (이벤트 기반 완전 분산 처리)**
+    - **개념:** 중앙 Orchestrator 없이, 각 마이크로서비스가 자신의 로컬 트랜잭션을 성공적으로 완료한 후, 그 결과를 나타내는 도메인 이벤트를 Kafka의 특정 토픽으로 발행(Publish)합니다. 이 Saga에 참여하는 다른 서비스들은 자신이 관심 있는 이벤트를 구독(Subscribe)하여, 해당 이벤트가 발생하면 자신의 다음 작업을 수행하고, 필요하다면 또 다른 도메인 이벤트를 발행하는 연쇄적인 방식으로 전체 Saga가 진행됩니다.
+    - **개념도:**코드 스니펫
+
+        ```mermaid
+        graph LR
+            %% Event Server API
+            subgraph Event_Server_API
+                A[API 요청 수신] --> B[RewardClaimInitiatedEvent 발행]
+            end
+        
+            B --> C[Kafka Topic: reward-claims-initiated]
+        
+            %% Validator Service
+            subgraph Validator_Service
+                C -- RewardClaimInitiatedEvent --> D{사용자/이벤트 검증}
+                D -- 유효 --> E[ClaimValidatedEvent 발행]
+                D -- 무효 --> F[ClaimValidationFailedEvent 발행]
+            end
+        
+            E --> K_Validated[Kafka Topic: claim-validated]
+            F --> K_Failed[Kafka Topic: claim-validation-failed]
+        
+            %% Condition Checker
+            subgraph Condition_Checker
+                K_Validated -- ClaimValidatedEvent --> G{조건 검증}
+                G -- 충족 --> H[ConditionMetEvent 발행]
+                G -- 미충족 --> I[ConditionNotMetEvent 발행]
+            end
+        
+            H --> K_ConditionMet[Kafka Topic: condition-met]
+            I --> K_ConditionFailed[Kafka Topic: condition-not-met]
+        
+            %% Inventory Service
+            subgraph Inventory_Service
+                K_ConditionMet -- ConditionMetEvent --> J{재고 할당}
+                J -- 성공 --> K_InvAlloc[InventoryAllocatedEvent 발행]
+                J -- 실패 --> L_InvFail[InventoryAllocationFailedEvent 발행]
+            end
+        
+            K_InvAlloc --> K_InventoryAllocated[Kafka Topic: inventory-allocated]
+            L_InvFail --> K_InventoryFailed[Kafka Topic: inventory-failed]
+        
+            %% Reward Granter
+            subgraph Reward_Granter
+                K_InventoryAllocated -- InventoryAllocatedEvent --> M{보상 지급 시도}
+                M -- 성공 --> N_Granted[RewardGrantedEvent 발행]
+                M -- 실패 --> O_Failed[RewardGrantFailedEvent 발행]
+            end
+        
+            N_Granted --> K_RewardGranted[Kafka Topic: reward-granted]
+            O_Failed --> K_RewardGrantFailed[Kafka Topic: reward-grant-failed]
+        
+            %% Finalizer Service
+            subgraph Finalizer_Service
+                K_RewardGranted --> P_Success[최종 성공 상태 업데이트]
+                K_RewardGrantFailed --> P_Fail[실패 상태 업데이트 및 트리거]
+                K_InventoryFailed --> P_Fail
+                K_ConditionFailed --> P_Fail
+                K_Failed --> P_Fail
+            end
+        
+            %% Compensation Handlers
+            subgraph Compensation_Handlers
+                K_RewardGrantFailed --> R_CompInv[재고 롤백 이벤트 처리]
+                K_InventoryFailed --> R_CompPrev[이전 단계 보상 처리]
+            end
+        
+        ```
+
+    - **장점:** 서비스 간 결합도가 극도로 낮아져 각 서비스의 독립적인 개발, 배포, 확장이 매우 용이해집니다. 특정 서비스의 장애가 다른 서비스에 미치는 영향이 최소화됩니다 (시간적 분리 - Temporal Decoupling). 각 서비스는 자신의 책임에만 집중할 수 있습니다.
+    - **단점 및 과제 적용 시 고려사항:**
+        - **전체 Saga 흐름 추적 및 모니터링의 어려움:** 중앙 관제탑이 없으므로 전체 트랜잭션이 현재 어떤 상태인지, 어디서 문제가 발생했는지 파악하기 위한 별도의 분산 추적(Distributed Tracing) 또는 Saga 상태 관리 메커니즘이 필요할 수 있습니다.
+        - **보상 트랜잭션 관리의 복잡성 증대:** 각 서비스는 자신이 발행한 이벤트에 대한 보상 이벤트를 스스로 발행하거나, 다른 서비스의 실패 이벤트를 구독하여 자신의 보상 로직을 실행해야 합니다. 전체적인 롤백 흐름을 설계하고 관리하기가 동기식 Orchestration보다 복잡할 수 있습니다. (예: 특정 실패 이벤트 발생 시, 이를 구독하는 여러 서비스가 각자의 보상 트랜잭션을 수행해야 함).
+        - **타임아웃 및 전체 Saga 실패 감지:** 특정 단계에서 다음 단계로의 진행을 알리는 응답 이벤트가 오랫동안 발행되지 않을 경우 타임아웃을 어떻게 처리할 것인지, 여러 이벤트의 조합으로 최종 Saga의 성공 또는 실패를 어떻게 판정할 것인지 등의 로직이 복잡해집니다.
+        - **이벤트 순서 보장 및 중복 처리:** 메시지 큐의 특성에 따라 이벤트 순서가 보장되지 않거나, 컨슈머 장애 시 동일 이벤트가 중복으로 처리될 수 있습니다. 이에 대한 대비(컨슈머 멱등성, 순서 보장 메커니즘)가 필요합니다.
+        - **본 과제에서는 시간 제약 및 복잡도 증가로 인해 완전한 Choreography 기반 Saga 구현은 권장되지 않으나, Kafka를 통한 비동기 통신과 이벤트 기반 아키텍처의 개념적 이해를 보여주는 것은 매우 가치 있습니다.**
+- **개선 방안 2: Orchestration과 Event를 결합한 하이브리드 Saga (현실적 절충안 - 본 과제에서 설계적으로 제안하기 좋은 방향)**
+    - **개념:** 여전히 `EventClaimsService`와 같은 Orchestrator가 Saga의 전체적인 흐름을 제어하고 `UserRewardRequest`의 상태를 관리합니다.
+    - 하지만, 시간이 오래 걸리거나 외부 시스템에 강하게 의존하는 각 **Saga 단계를 직접 동기 API 호출로 실행하는 대신, 해당 작업을 요청하는 "커맨드(Command)성 이벤트"를 Kafka로 발행**합니다.
+    - 각 커맨드를 처리하는 전용 컨슈머(Event Server 내 별도 모듈 또는 다른 마이크로서비스)는 작업을 완료한 후
+      그 결과를 **"결과(Result) 또는 도메인 이벤트"로 Kafka에 다시 발행**하고, Orchestrator는 이 결과 이벤트를 구독하여 다음 단계를 진행하거나 실패를 처리합니다.
+    - **개념도:**
+
+        ```mermaid
+        sequenceDiagram
+            participant Client
+            participant Gateway
+            participant EventSvc as EventClaimsService (Orchestrator)
+            participant Kafka
+            participant ConditionSvc as ConditionCheck Consumer
+            participant InventorySvc as Inventory Consumer
+            participant RewardSvc as RewardGrant Consumer
+        
+            Client->>Gateway: 보상 요청 (IdempotencyKey)
+            Gateway->>EventSvc: 요청 전달 (API)
+            EventSvc->>EventSvc: UserRewardRequest 생성 (status: PENDING_VALIDATION)
+            Note over EventSvc: S1: 사용자/이벤트 유효성 검증 (Auth API 동기 호출)
+            alt S1 유효성 통과
+                EventSvc->>EventSvc: status: PENDING_CONDITION_CHECK, DB 저장
+                EventSvc->>Kafka: Publish(CheckConditionCommand - requestId, userId, eventConditions)
+            else S1 유효성 실패
+                EventSvc->>EventSvc: status: FAILED_VALIDATION_*, DB 저장
+                EventSvc-->>Gateway: 실패 응답
+                Gateway-->>Client: 실패 응답
+            end
+        
+            Kafka-->>ConditionSvc: Consume(CheckConditionCommand)
+            ConditionSvc->>ConditionSvc: 조건 검증 로직 수행 ((Mock)GameData API 호출 등)
+            ConditionSvc->>Kafka: Publish(ConditionCheckedEvent - requestId, met:true/false, reason)
+        
+            Kafka-->>EventSvc: Consume(ConditionCheckedEvent)
+            EventSvc->>EventSvc: UserRewardRequest 상태 업데이트 (currentSagaStep, status 등)
+            alt 조건 충족 (met:true)
+                EventSvc->>Kafka: Publish(AllocateInventoryCommand - requestId, rewardsToAllocate)
+            else 조건 미충족 (met:false)
+                EventSvc->>EventSvc: status: CONDITION_NOT_MET, DB 저장
+                EventSvc-->>Gateway: (비동기 처리 시) 별도 알림 또는 상태 조회 API 통해 결과 전달
+                Gateway-->>Client: (비동기 처리 시) 별도 알림 또는 상태 조회 API 통해 결과 전달
+            end
+        
+            Kafka-->>InventorySvc: Consume(AllocateInventoryCommand)
+            InventorySvc->>InventorySvc: 재고 처리 (DB 조건부 업데이트)
+            InventorySvc->>Kafka: Publish(InventoryAllocatedEvent - requestId, status:SUCCESS/OUT_OF_STOCK)
+        
+            Kafka-->>EventSvc: Consume(InventoryAllocatedEvent)
+            EventSvc->>EventSvc: UserRewardRequest 상태 업데이트
+            alt 재고 할당 성공 (status:SUCCESS)
+                EventSvc->>Kafka: Publish(GrantRewardCommand - requestId, rewardsToGrant)
+            else 재고 할당 실패 (status:OUT_OF_STOCK)
+                EventSvc->>Kafka: Publish(CompensatePreviousStepsCommand - requestId, fromStep:S3) % 보상 커맨드
+                EventSvc->>EventSvc: status: FAILED_ROLLED_BACK (또는 PENDING_COMPENSATION), DB 저장
+            end
+        
+            Kafka-->>RewardSvc: Consume(GrantRewardCommand)
+            RewardSvc->>RewardSvc: 보상 지급 ((Mock)Reward Fulfillment API 호출)
+            RewardSvc->>Kafka: Publish(RewardGrantedEvent 또는 RewardGrantFailedEvent - requestId, grantStatus, rewardDetails)
+        
+            Kafka-->>EventSvc: Consume(RewardGrantedEvent / RewardGrantFailedEvent)
+            EventSvc->>EventSvc: UserRewardRequest 상태 업데이트 (processedRewards, status 등)
+            alt 모든 보상 지급 성공
+                EventSvc->>EventSvc: status: SUCCESS_ALL_GRANTED, DB 저장
+            else 일부/전체 보상 지급 실패
+                EventSvc->>Kafka: Publish(CompensateInventoryCommand - requestId, ...) % S3 롤백 커맨드
+                EventSvc->>Kafka: Publish(CompensateGrantedRewardsCommand - requestId, ...) % S4 기지급 보상 롤백 커맨드 (필요시)
+                EventSvc->>EventSvc: status: FAILED_ROLLED_BACK (또는 PENDING_COMPENSATION), DB 저장
+            end
+        
+            EventSvc-->>Gateway: (비동기 처리 시) 최종 결과 알림 또는 상태 조회 API 통해 전달
+            Gateway-->>Client: (비동기 처리 시) 최종 결과 알림 또는 상태 조회 API 통해 전달
+        ```
+
+    - **장점:**
+        - **흐름 제어의 명확성 유지:** Orchestrator(`EventClaimsService`)가 전체 Saga의 흐름을 알고 상태를 관리하므로, Choreography 방식보다 전체 트랜잭션을 이해하고 제어하기가 상대적으로 용이합니다.
+        - **비동기 처리의 이점 활용:** 시간이 오래 걸리거나 외부 시스템에 의존적인 작업(조건 확인, 재고 할당, 실제 보상 지급 등)을 Kafka 이벤트를 통해 비동기적으로 처리함으로써, 최초 API 요청에 대한 응답 시간을 크게 단축시키고 시스템 전체의 자원 사용 효율성을 높일 수 있습니다.
+        - **롤백 로직의 유연성 및 분산:** 실패 발생 시, Orchestrator는 해당 단계의 실패를 인지하고 필요한 보상 커맨드 이벤트(예: `CompensateInventoryCommand`, `RevokeGrantedRewardCommand`)를 Kafka로 발행할 수 있습니다. 이 커맨드를 구독하는 각 담당 서비스(또는 컨슈머)가 실제 롤백 작업을 수행합니다. 이를 통해 "일일이 되돌리는" 복잡한 로직이 Orchestrator에서 각 담당 서비스로 분산되면서도, 전체적인 롤백 흐름은 중앙에서 통제될 수 있습니다.
+        - **Resilience 및 내결함성 향상:** Kafka가 메시지 버퍼 역할을 하므로, 특정 커맨드를 처리하는 서비스(컨슈머)가 일시적으로 다운되더라도 커맨드 이벤트는 유실되지 않고 해당 서비스가 복구된 후 나중에 처리될 수 있습니다. 각 컨슈머는 자체적인 재시도 로직, Dead Letter Queue(DLQ) 처리 등을 구현하여 안정성을 더욱 높일 수 있습니다.
+    - **Kafka 도입 시 "롤백(보상 트랜잭션)" 처리의 변화:**
+        - Orchestrator(`EventClaimsService`)는 더 이상 모든 보상 로직을 직접 동기 API로 호출하여 실행하지 않습니다. 대신, 예를 들어 S4(보상 지급) 단계에서 실패가 발생하면, Orchestrator는 S3(재고 할당) 단계에서 변경된 내용을 되돌리기 위해 `CompensateInventoryCommand` 이벤트를 Kafka로 발행할 수 있습니다.
+        - `InventoryService`(또는 `InventoryConsumer`)는 `CompensateInventoryCommand`를 구독하여 실제 재고 원복 로직을 수행하고, 완료 후 `InventoryCompensatedEvent`를 발행합니다. Orchestrator는 이 결과 이벤트를 받아 Saga의 다음 상태를 결정합니다.
+        - 이를 통해 `EventClaimsService`의 코드는 각 단계의 "요청(커맨드 발행)"과 "결과 수신(이벤트 구독)"에 집중하게 되어 간결해질 수 있으며, 실제 작업 수행 및 보상 로직은 각 담당 서비스/컨슈머로 분산되어 책임이 명확해지고 전체 시스템의 관리 복잡도가 낮아질 수 있습니다. (단, Kafka 연동, 이벤트 스키마 관리, 컨슈머 구현 등의 새로운 복잡성이 추가됩니다.)
+    - **Kafka 이벤트 페이로드 예시 (Orchestration + Event 기반):**
+        - **커맨드 이벤트 (Event Server Orchestrator → Kafka → 담당 컨슈머):**
+            - `CheckEventConditionsCommand`: `{ "requestId": "uuid-string", "userId": "string", "eventId": "string", "eventSnapshot": { "conditions": {...} } }`
+            - `AllocateInventoryCommand`: `{ "requestId": "uuid", "eventId": "string", "rewardsToAllocate": [{ "rewardIdFromEventSnapshot": "objectId-string", "quantityPerUser": 1, "totalStockSnapshot": -1 }] }`
+            - `GrantRewardCommand`: `{ "requestId": "uuid", "userId": "string", "rewardToGrant": { "rewardType": "POINT", "details": {"points": 100}, ... }, "idempotencyKeyForGrant": "uuid-per-reward" }`
+            - `CompensateInventoryCommand`: `{ "requestId": "uuid", "eventId": "string", "rewardsToRollbackStock": [{ "rewardIdFromEventSnapshot": "objectId-string", "quantityCompensated": 1 }] }`
+        - **결과/도메인 이벤트 (담당 컨슈머 → Kafka → Event Server Orchestrator):**
+            - `EventConditionsCheckedEvent`: `{ "requestId": "uuid", "conditionsMet": true/false, "failureReason": "string", "checkedDataSnapshotIfAny": {...} }`
+            - `InventoryAllocatedEvent`: `{ "requestId": "uuid", "allocationResult": { "rewardIdFromEventSnapshot": "objectId-string", "status": "SUCCESS" / "OUT_OF_STOCK" / "ERROR", "failureReason": "string" }, ... }` (보상별 결과 또는 전체 결과)
+            - `RewardGrantedEvent`: `{ "requestId": "uuid", "grantResult": { "rewardIdFromEventSnapshot": "objectId-string", "status": "SUCCESS" / "FAILED", "failureReason": "string", "fulfillmentTransactionId": "string" }, ... }` (보상별 결과)
+            - `InventoryCompensatedEvent`: `{ "requestId": "uuid", "compensationResult": { "rewardIdFromEventSnapshot": "objectId-string", "status": "SUCCESS" / "FAILED" }, ... }`
+
+## 3. API 멱등성 확보 전략 (`X-Idempotency-Key`)
+
+코드 스니펫
+
+```mermaid
+graph TD
+    Client -- "1. 요청 (IdempotencyKey 포함)" --> Server;
     subgraph Server
         direction LR
-        R_START["요청 수신"] --> R_CHECK{"DB에 동일 Key 요청 존재?"}
-        R_CHECK -- "없음 최초 요청" --> R_NEW["새 UserRewardRequest 생성"]
-        R_NEW --> R_PROCESS["Saga 로직 수행"]
-        R_PROCESS --> R_RESULT_DB["결과 DB 저장"]
-        R_RESULT_DB --> R_RESPOND_NEW["클라이언트에 응답"]
+        R_START["요청 수신"] --> R_CHECK{"DB에 동일 Key 요청 존재?"};
+        R_CHECK -- "없음 (최초 요청)" --> R_NEW["새 UserRewardRequest 생성 (Key, PENDING 상태)"];
+        R_NEW --> R_PROCESS["Saga 로직 수행"];
+        R_PROCESS --> R_RESULT_DB["결과 DB 저장"];
+        R_RESULT_DB --> R_RESPOND_NEW["클라이언트에 응답"];
         
-        R_CHECK -- "있음" --> R_EXISTING_STATUS{"이전 요청 상태?"}
-        R_EXISTING_STATUS -- "성공SUCCESS" --> R_RESPOND_EXISTING_SUCCESS["이전 성공 응답 반환"]
-        R_EXISTING_STATUS -- "실패FAILED" --> R_RESPOND_EXISTING_FAILED["이전 실패 응답 반환"]
-        R_EXISTING_STATUS -- "처리중PENDING" --> R_RESPOND_PENDING["처리 중 응답"]
+        R_CHECK -- "있음" --> R_EXISTING_STATUS{"이전 요청 상태?"};
+        R_EXISTING_STATUS -- "성공(SUCCESS)" --> R_RESPOND_EXISTING_SUCCESS["이전 성공 응답 반환"];
+        R_EXISTING_STATUS -- "실패(FAILED)" --> R_RESPOND_EXISTING_FAILED["이전 실패 응답 반환"];
+        R_EXISTING_STATUS -- "처리중(PENDING)" --> R_RESPOND_PENDING["처리 중 응답 (HTTP 429/202)"];
     end
 ```
 
-- **핵심 처리 로직:**
-    1. **클라이언트:** 최초 상태 변경 요청 시 고유 `X-Idempotency-Key` (예: UUID) 생성 후 HTTP 헤더 포함 전송. 네트워크 오류 등 재시도 시 **동일 `X-Idempotency-Key` 사용** 필수.
-    2. **서버 (Event Server `EventClaimsService.initiateClaim`):**
-        - `X-Idempotency-Key` 추출 후 `UserRewardRequest.requestId` 필드로 사용 (`unique` 인덱스 설정).
-        - **최초 요청:** `requestId` 조회 시 기존 문서 부재 시, 신규 `UserRewardRequest` 생성 (초기 상태 `PENDING_VALIDATION` 등) 후 Saga 로직 시작.
-        - **중복 요청:** `requestId`로 기존 문서 조회 성공 시:
-            - **이전 성공 완료 (`status`가 `SUCCESS_ALL_GRANTED` 등):** 저장된 이전 성공 응답 반환 (또는 "이미 성공 처리됨" 메시지와 200 OK / 적절 상태 코드). (응답 내용 저장은 `UserRewardRequest`에 추가 필드 필요 가능).
-            - **이전 실패 완료 (`status`가 `FAILED_*` 등):** 저장된 이전 실패 응답 반환 (또는 "이미 실패한 요청" 메시지와 적절 오류 상태 코드). (정책상 특정 실패 재시도 허용 가능하나, 멱등성은 동일 요청-동일 결과 원칙).
-            - **이전 처리 중 (`status`가 `PENDING_*` 등):** "현재 요청 처리 중. 잠시 후 확인 요망." 메시지와 HTTP 429 (Too Many Requests) 또는 202 (Accepted) 상태 코드 반환. 신규 Saga 인스턴스 중복 생성 방지.
-            <!-- end list -->
-    - **키 유효 기간 (TTL):** 현재 설계는 `UserRewardRequest` 문서 자체에 키(`requestId`)와 처리 상태 저장, 문서 보관 정책이 키 유효 기간. (별도 캐시(예: Redis) 사용 시 TTL 설정(예: 24~48시간) 고려).
+**핵심 처리 로직 (요약):**
+
+1. **클라이언트:** 최초 요청 시 UUID와 같은 고유한 `X-Idempotency-Key`를 생성하여 HTTP 헤더에 포함시켜 전송.
+
+   네트워크 오류 등으로 응답을 받지 못해 재시도할 경우, **반드시 동일한 `X-Idempotency-Key`를 사용**하여 재요청.
+
+2. **서버 (Event Server `EventClaimsService.initiateClaim`):**
+    - `X-Idempotency-Key`를 추출하여 `UserRewardRequest`의 `requestId` 필드(unique 인덱스 설정)로 사용.
+    - **최초 요청:** `requestId`로 조회 시 기존 문서가 없으면, 신규 `UserRewardRequest`를 `PENDING_VALIDATION` 상태로 생성하고 Saga 로직 시작.
+    - **중복 요청:** `requestId`로 기존 문서 조회 성공 시, 이전 요청의 `status`에 따라 적절한 응답(이전 성공/실패 결과 또는 "처리 중" 알림)을 반환하고 Saga를 중복 실행하지 않음.
+- **키 유효 기간 (TTL):** 현재 설계에서는 `UserRewardRequest` 문서 자체에 멱등성 키와 처리 상태를 저장하므로, 해당 문서의 보관 정책이 곧 키의 유효 기간이 된다. (별도 캐시 시스템 사용 시 TTL 설정 고려 가능).
 
 ## 4. 주요 엣지 케이스 및 대응 방안 (표)
 
-사용자 보상 요청 Saga 진행 중 발생 가능 주요 엣지 케이스, 시스템 감지 방법, 대응 전략, 최종 상태, 필요 보상 트랜잭션은 다음과 같음.
+사용자 보상 요청 Saga 진행 중 발생 가능 주요 엣지 케이스, 시스템 감지 방법, 대응 전략, `UserRewardRequest` 최종 상태, 필요 보상 트랜잭션은 다음과 같다. (표 내용은 이전 답변의 것을 그대로 사용하고, 실제 `EventClaimsService` 코드의 상태값과 보상 트랜잭션 호출 로직과 일치하도록 최종 검토합니다.)
 
 | 엣지 케이스 상황 | 발생 가능 Saga 단계 | 감지 방법 | 대응 전략 및 `UserRewardRequest` 상태 변화 | 보상 트랜잭션 필요 여부 및 내용 |
 | --- | --- | --- | --- | --- |
-| **사용자 탈퇴/밴** (보상 요청 처리 중 발생) | S1 (유효성 검증), S4 (지급 직전 최종 확인) | Auth Server API 응답 (사용자 상태 재확인) 또는 (향후 Kafka) Auth Server 발행 `UserDeactivatedEvent` 수신 | Saga 즉시 중단. `UserRewardRequest.status` = `VALIDATION_FAILED_USER_INACTIVE` (S1 감지) 또는 `REWARD_GRANT_FAILED_USER_INACTIVE` (S4 감지). `failureReason`에 "사용자 비활성" 기록. | S4에서 발생 및 S3 재고 할당 완료 시, 해당 재고 롤백 (`PENDING_COMPENSATION_INVENTORY` -> `COMPENSATED_INVENTORY`). S4에서 일부 보상 기 지급 시 해당 보상 회수 시도(Mock) (`PENDING_COMPENSATION_REWARD` -> `COMPENSATED_REWARD`). 최종 `FAILED_ROLLED_BACK`. |
-| **이벤트 비활성/종료** (보상 요청 처리 중 발생) | S1 (유효성 검증), S4 (지급 직전 최종 확인 - 선택적) | Event DB 조회 (이벤트 `status` 및 `endDate` 재확인) | Saga 즉시 중단. `UserRewardRequest.status` = `VALIDATION_FAILED_EVENT_NOT_ACTIVE`. `failureReason`에 "이벤트 비활성 또는 기간 종료" 기록. | S4에서 발생 및 S3 재고 할당 완료 시, 해당 재고 롤백. |
-| **한정 수량 보상 재고 소진** (단순화된 DB 업데이트 사용) | S3 (재고 반영) | Event DB 조건부 업데이트 결과 (0 row affected 또는 재고 &lt; 요청 수량) | `UserRewardRequest.status` = `INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK`. `failureReason`에 "재고 부족" 기록. Saga 종료. | 이전 다른 보상에 대한 부분적 재고 할당 시 해당 재고 롤백. (현재 설계: 각 보상 순차 또는 전체 일괄 처리). |
-| **(Mock) 외부 보상 지급 시스템 오류/타임아웃** | S4 (보상 지급) | 외부 API 호출 HTTP 오류 응답(5xx 등), Timeout Exception, 네트워크 연결 오류 등 | 제한 횟수 재시도 (외부 API 멱등성 지원 또는 Event Server의 재시도 시 고유 트랜잭션 ID 전달로 외부 중복 처리 방지 가능 시). 최종 실패 시 `UserRewardRequest.status` = `REWARD_GRANT_FAILED_EXTERNAL`. `failureReason` 상세 오류 기록. 비즈니스 정책(All-or-Nothing/부분 성공) 기반 전체 롤백 또는 부분 성공 처리. | **All-or-Nothing:** S3 할당 전체 재고 롤백. S4 기 성공 지급 다른 보상 회수 시도(Mock). 최종 `FAILED_ROLLED_BACK`. **부분 성공 허용:** 실패 보상 관련 부분 롤백. |
-| **Event Server 예기치 않은 재시작** (Saga 진행 중) | 모든 Saga 단계 | 서버 재시작 후, `status`가 `PENDING_*`인 `UserRewardRequest` 문서 조회. | 각 요청의 `currentSagaStep` 및 저장 정보 기반 Saga 안전 재개 시도 (각 단계 로직 멱등성 필수. DB 즉시 반영 중요). 재개 불가 시, 전체 변경 롤백 후 `FAILED_ROLLED_BACK` (또는 `COMPENSATION_FAILED_MANUAL_INTERVENTION_REQUIRED`) 처리. 장시간 `PENDING_*` 요청 타임아웃 처리 로직 필요. | 재개 불가 시, 해당 요청의 마지막 성공 Saga 단계까지 모든 작업 역순 보상 트랜잭션 실행. `compensatingActionsLog` 기록. |
-| **동일 `X-Idempotency-Key`로 중복 요청** | S0 (요청 접수) | `requestId` (멱등성 키)로 `UserRewardRequest` 조회 시 기존 문서 발견. | 이전 요청 `status` 기반 응답: `SUCCESS_ALL_GRANTED` 시 이전 성공 결과 반환. `FAILED_*` 시 이전 실패 결과 반환 (정책상 재시도 가능). `PENDING_*` 시 "처리 중" 응답 (HTTP 429/202). 신규 Saga 인스턴스 생성 방지. | 없음. 기존 처리 결과 준수. |
-| **DB 커넥션 오류 또는 일시적 쓰기 실패** | DB 접근 모든 단계 | MongoDB 드라이버 예외 (예: `MongoNetworkError`). | 일시적 네트워크 오류 시, 제한 횟수 DB 작업 재시도 (DB 드라이버/애플리케이션 레벨). 지속 실패 시 해당 Saga 단계 실패 처리 및 전체 Saga 롤백 절차 진행. `UserRewardRequest.status`를 `*_ERROR_DB` (예: `INVENTORY_ALLOCATION_ERROR_DB`) 등으로 변경, `failureReason` 기록. | 해당 단계까지 성공 진행 작업 전체 보상 트랜잭션 실행. |
-| **Saga 보상 트랜잭션 자체의 실패** | 보상 트랜잭션 실행 단계 | 보상 API 호출 실패, 보상 DB 업데이트 실패 등. | 매우 심각. `UserRewardRequest.status` = `COMPENSATION_FAILED_MANUAL_INTERVENTION_REQUIRED` 변경. `failureReason` 및 `compensatingActionsLog` 상세 기록. **운영팀 즉시 알림** (모니터링 시스템 연동). 수동 데이터 복구 및 문제 해결 필요. |  |
+| **사용자 탈퇴/밴** (보상 요청 처리 중 발생) | S1 (유효성 검증), S4 (지급 직전 최종 확인) | `mockAuthService.isUserActive` 응답 `false` | Saga 즉시 중단. `status` = `VALIDATION_FAILED_USER_INACTIVE` (S1) 또는 `REWARD_GRANT_FAILED_USER_INACTIVE` (S4). `failureReason` 기록. | S4에서 발생 및 S3 재고 할당 완료 시, `compensateInventory` 호출. S4에서 일부 보상 기 지급 시 해당 보상 회수(Mock) 시도. 최종 `FAILED_ROLLED_BACK`. |
+| **이벤트 비활성/종료** (보상 요청 처리 중 발생) | S1 (유효성 검증), S4 (지급 직전 최종 확인 - 현재 코드에는 S4 재확인 없음) | `eventModel.findById` 결과 및 `event.status`, `event.endDate` 확인 | Saga 즉시 중단. `status` = `VALIDATION_FAILED_EVENT_NOT_ACTIVE`. `failureReason` 기록. | S4에서 발생 및 S3 재고 할당 완료 시, `compensateInventory` 호출. |
+| **한정 수량 보상 재고 소진** (단순화된 DB 업데이트 사용) | S3 (재고 반영) | `eventModel.updateOne`의 `modifiedCount == 0` 또는 `eventReward.remainingStock <= 0` | `rewardToProcess.grantStatus = 'FAILED_OUT_OF_STOCK'`. 전체 `status` = `INVENTORY_ALLOCATION_FAILED_OUT_OF_STOCK`. `compensateInventory` 호출 후 `status` = `FAILED_ROLLED_BACK`. Saga 종료. | `compensateInventory` 실행 (기 할당된 다른 보상 재고 원복). |
+| **(Mock) 외부 보상 지급 시스템 오류/타임아웃** | S4 (보상 지급) | `mockRewardFulfillmentService.grantReward` 응답 `success: false` | 해당 보상 `rewardToProcess.grantStatus = 'FAILED_EXTERNAL'`. `failureReason` 기록. All-or-Nothing 정책으로 `status` = `REWARD_GRANT_FAILED_EXTERNAL`, `compensateInventory(true)` 호출 후 `status` = `FAILED_ROLLED_BACK`. | `compensateInventory(true)` 실행 (S3 재고 롤백). (Mock) 기 성공 지급 다른 보상 회수 시도. |
+| **Event Server 예기치 않은 재시작** (Saga 진행 중) | 모든 Saga 단계 | 서버 재시작 후, `status`가 `PENDING_*`인 `UserRewardRequest` 문서 스캔 (별도 복구 로직 필요 - 현재 미구현) | **(현재 미구현, 설계적 고려)** 각 요청의 `currentSagaStep` 및 저장 정보 기반 Saga 안전 재개 또는 롤백. 장시간 `PENDING_*` 요청 타임아웃 처리. 현재는 `initiateClaim` 내에서 Saga가 동기적으로 실행되므로, 이 경우 요청 자체가 실패할 가능성이 높음. | 재개 불가 시, 수동 개입 또는 마지막 성공 단계까지의 작업 역순 보상. |
+| **동일 `X-Idempotency-Key`로 중복 요청** | S0 (요청 접수) | `userRewardRequestModel.findOne({ requestId })` 결과로 기존 문서 발견. | `initiateClaim` 메서드 초반 로직: 이전 요청 `status` 기반으로 기존 요청 문서 반환. 신규 Saga 생성 안 함. | 없음. 기존 처리 결과 따름. |
+| **DB 커넥션 오류 또는 일시적 쓰기 실패** (`save()`, `updateOne()` 등) | DB 접근 모든 단계 | Mongoose 예외 발생 (try-catch로 감지) | 현재 코드: 대부분의 DB 오류는 `InternalServerErrorException`으로 상위 전파. 더 정교한 재시도 로직 필요. Saga 실패 시 `status` = `COMPENSATION_FAILED_MANUAL_INTERVENTION_REQUIRED` (최상위 catch 블록). | 해당 단계까지 성공 진행 작업에 대한 보상 트랜잭션 실행 필요 (현재는 최상위 catch에서 일괄 처리). |
+| **Saga 보상 트랜잭션 (`compensateInventory`) 자체의 실패** | `compensateInventory` 실행 중 | DB 업데이트 예외 등 | 현재 `compensateInventory` 내부에 별도 try-catch 없음. 실패 시 `processRewardClaimSaga`의 최상위 catch 블록으로 전파되어 `status` = `COMPENSATION_FAILED_MANUAL_INTERVENTION_REQUIRED`로 처리될 수 있음. 더 명확한 로깅 및 알림 필요. |  |
