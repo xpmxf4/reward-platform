@@ -3,9 +3,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { UserRewardRequest, UserRewardRequestDocument } from '../schemas/user-reward-request.schema';
 import { Event, EventDocument} from '../../events/schemas/event.schema';
-import { Reward } from '../../events/schemas/reward.schema'; // Reward도 event.schema.ts에서 export 가정
+import { Reward } from '../../events/schemas/reward.schema';
 
-// Mock 외부 서비스 호출 인터페이스 (실제로는 HttpModule 등으로 외부 호출)
 interface MockAuthService {
   isUserActive(userId: string): Promise<boolean>;
 }
@@ -136,6 +135,41 @@ export class EventClaimsService {
     }
 
     return this.userRewardRequestModel.findById(existingRequest._id).exec();
+  }
+
+  async findByUserId(
+    userId: string,
+    status?: string,
+    page: number = 1,
+    limit: number = 10,
+    sortBy: string = 'createdAt',
+    sortOrder: 'asc' | 'desc' = 'desc',
+  ): Promise<{ data: UserRewardRequestDocument[], total: number, currentPage: number, totalPages: number }> {
+    if (!userId) {
+      throw new BadRequestException('사용자 ID는 필수입니다.');
+    }
+    const query: any = { userId };
+    if (status) {
+      query.status = status;
+    }
+
+    const skip = (page - 1) * limit;
+    const total = await this.userRewardRequestModel.countDocuments(query).exec();
+
+    const sortOptions: any = {};
+    sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
+
+    const data = await this.userRewardRequestModel
+    .find(query)
+    .sort(sortOptions)
+    .skip(skip)
+    .limit(limit)
+    .select('-eventSnapshot -compensatingActionsLog -rewardsToProcess.rewardDetailsSnapshot') // 응답에서 민감하거나 너무 큰 필드 제외
+    .populate('eventId', 'eventName status') // 이벤트 ID로 이벤트 이름, 상태 함께 조회 (선택적)
+    .exec();
+
+    this.logger.log(`Finding claims for userId: ${userId}. Status: ${status}, Page: ${page}, Limit: ${limit}. Found: <span class="math-inline">\{data\.length\}/</span>{total}`);
+    return { data, total, currentPage: page, totalPages: Math.ceil(total / limit) };
   }
 
   private async processRewardClaimSaga(requestDoc: UserRewardRequestDocument): Promise<void> {
